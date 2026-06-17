@@ -23,7 +23,7 @@ import sys
 
 from .kis.config import load_settings
 from .kis.client import KisClient
-from .kis import market, orders, screener, report, overseas, poc, krpoc, poc_all, pricelog, pricelog_par, daily, investor, papertest, strat_v0, propose, place, minbars, auctionmon, fundamentals, nav, overlay, scorecard, quality, us_stab
+from .kis import market, orders, screener, report, overseas, poc, krpoc, poc_all, pricelog, pricelog_par, daily, investor, papertest, strat_v0, propose, place, minbars, auctionmon, fundamentals, nav, overlay, scorecard, quality, us_stab, regime
 from .kis.safety import SafetyError
 
 
@@ -112,6 +112,8 @@ def main(argv=None):
     p_sc.add_argument("--wide", action="store_true", help="확장 유니버스(자동발굴 ~120)로 평가")
     sub.add_parser("quality", parents=[common],
                    help="지주사 사업 질·재무(ROE/부채/성장) 표")
+    sub.add_parser("regime", parents=[common],
+                   help="레짐·로테이션 대시보드(KR+US ETF 상대강도, 오건영 갈림길 참고)")
     p_us = sub.add_parser("usstab", parents=[common],
                           help="H1 하버스 — 미국 기계적 왕복 안정성 테스트(buy/sell/report)")
     p_us.add_argument("action", choices=["buy", "sell", "report"])
@@ -415,6 +417,8 @@ def main(argv=None):
             print(scorecard.report(c, _basket, top=args.top))
         elif args.cmd == "quality":
             print(quality.summary(c, fundamentals.HOLDCO_BASKET))
+        elif args.cmd == "regime":
+            print(regime.dashboard(c))
         elif args.cmd == "usstab":
             sym = args.symbol or us_stab.SYMBOL
             if args.action == "buy":
