@@ -23,7 +23,7 @@ import sys
 
 from .kis.config import load_settings
 from .kis.client import KisClient
-from .kis import market, orders, screener, report, overseas, poc, krpoc, poc_all, pricelog, pricelog_par, daily, investor, papertest, strat_v0, propose, place, minbars, auctionmon, fundamentals, nav, overlay, scorecard, quality, growth, portfolio, us_stab, regime
+from .kis import market, orders, screener, report, overseas, poc, krpoc, poc_all, pricelog, pricelog_par, daily, investor, papertest, strat_v0, propose, place, minbars, auctionmon, fundamentals, nav, overlay, scorecard, quality, growth, portfolio, us_stab, regime, dca
 from .kis.safety import SafetyError
 
 
@@ -124,6 +124,11 @@ def main(argv=None):
     p_us.add_argument("action", choices=["buy", "sell", "report"])
     p_us.add_argument("--symbol", default=None, help="기본 SOFI")
     p_us.add_argument("--live", action="store_true", help="실주문(.env DRY_RUN=false라야 발동)")
+    p_dca = sub.add_parser("dca", parents=[common],
+                           help="월간 에너지 DCA(매일 체크·월1회 매수·딥강화/고점절반·원장)")
+    p_dca.add_argument("action", choices=["check", "report"])
+    p_dca.add_argument("--budget", type=float, default=None, help="월 예산 USD(기본 소액)")
+    p_dca.add_argument("--live", action="store_true", help="실주문(.env DRY_RUN=false라야 발동)")
     sub.add_parser("investor", parents=[common], help="일별 투자자 순매수(개인/기관/외국인) 다운로드")
     sub.add_parser("investoracc", parents=[common], help="투자자 수급 일일 누적(history 병합)")
     p_pr=sub.add_parser("propose", parents=[common], help="일일 후보 제안(내일 진입/목표가)")
@@ -428,6 +433,11 @@ def main(argv=None):
             print(portfolio.report(c))
         elif args.cmd == "regime":
             print(regime.dashboard(c))
+        elif args.cmd == "dca":
+            if args.action == "check":
+                _print(dca.check(c, budget=(args.budget or dca.BUDGET_USD), live=args.live))
+            else:
+                print(dca.report(c))
         elif args.cmd == "usstab":
             sym = args.symbol or us_stab.SYMBOL
             if args.action == "buy":
