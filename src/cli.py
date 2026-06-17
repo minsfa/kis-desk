@@ -23,7 +23,7 @@ import sys
 
 from .kis.config import load_settings
 from .kis.client import KisClient
-from .kis import market, orders, screener, report, overseas, poc, krpoc, poc_all, pricelog, pricelog_par, daily, investor, papertest, strat_v0, propose, place, minbars, auctionmon, fundamentals, nav, overlay, scorecard, quality
+from .kis import market, orders, screener, report, overseas, poc, krpoc, poc_all, pricelog, pricelog_par, daily, investor, papertest, strat_v0, propose, place, minbars, auctionmon, fundamentals, nav, overlay, scorecard, quality, growth
 from .kis.safety import SafetyError
 
 
@@ -112,6 +112,9 @@ def main(argv=None):
     p_sc.add_argument("--wide", action="store_true", help="확장 유니버스(자동발굴 ~120)로 평가")
     sub.add_parser("quality", parents=[common],
                    help="지주사 사업 질·재무(ROE/부채/성장) 표")
+    p_gr = sub.add_parser("growth", parents=[common],
+                          help="성장 렌즈(매출CAGR/마진추세/PSR/PEG/CAGR허들) — 정량만")
+    p_gr.add_argument("code")
     sub.add_parser("investor", parents=[common], help="일별 투자자 순매수(개인/기관/외국인) 다운로드")
     sub.add_parser("investoracc", parents=[common], help="투자자 수급 일일 누적(history 병합)")
     p_pr=sub.add_parser("propose", parents=[common], help="일일 후보 제안(내일 진입/목표가)")
@@ -406,6 +409,8 @@ def main(argv=None):
             print(scorecard.report(c, _basket, top=args.top))
         elif args.cmd == "quality":
             print(quality.summary(c, fundamentals.HOLDCO_BASKET))
+        elif args.cmd == "growth":
+            print(growth.summary(c, args.code))
         elif args.cmd == "investor":
             print(investor.download_basket(c, daily.VALUE_BASKET))
         elif args.cmd == "investoracc":
