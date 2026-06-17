@@ -23,7 +23,7 @@ import sys
 
 from .kis.config import load_settings
 from .kis.client import KisClient
-from .kis import market, orders, screener, report, overseas, poc, krpoc, poc_all, pricelog, pricelog_par, daily, investor, papertest, strat_v0, propose, place, minbars, auctionmon, fundamentals, nav, overlay, scorecard, quality
+from .kis import market, orders, screener, report, overseas, poc, krpoc, poc_all, pricelog, pricelog_par, daily, investor, papertest, strat_v0, propose, place, minbars, auctionmon, fundamentals, nav, overlay, scorecard, quality, us_stab
 from .kis.safety import SafetyError
 
 
@@ -112,6 +112,11 @@ def main(argv=None):
     p_sc.add_argument("--wide", action="store_true", help="확장 유니버스(자동발굴 ~120)로 평가")
     sub.add_parser("quality", parents=[common],
                    help="지주사 사업 질·재무(ROE/부채/성장) 표")
+    p_us = sub.add_parser("usstab", parents=[common],
+                          help="H1 하버스 — 미국 기계적 왕복 안정성 테스트(buy/sell/report)")
+    p_us.add_argument("action", choices=["buy", "sell", "report"])
+    p_us.add_argument("--symbol", default=None, help="기본 SOFI")
+    p_us.add_argument("--live", action="store_true", help="실주문(.env DRY_RUN=false라야 발동)")
     sub.add_parser("investor", parents=[common], help="일별 투자자 순매수(개인/기관/외국인) 다운로드")
     sub.add_parser("investoracc", parents=[common], help="투자자 수급 일일 누적(history 병합)")
     p_pr=sub.add_parser("propose", parents=[common], help="일일 후보 제안(내일 진입/목표가)")
@@ -245,6 +250,10 @@ def main(argv=None):
     # report 는 로그만 읽으므로 키 없이도 동작
     if args.cmd == "report":
         print(report.summarize_today())
+        return 0
+
+    if args.cmd == "usstab" and args.action == "report":   # CSV만 읽음 — 키 불필요
+        print(us_stab.report())
         return 0
 
     try:
@@ -406,6 +415,12 @@ def main(argv=None):
             print(scorecard.report(c, _basket, top=args.top))
         elif args.cmd == "quality":
             print(quality.summary(c, fundamentals.HOLDCO_BASKET))
+        elif args.cmd == "usstab":
+            sym = args.symbol or us_stab.SYMBOL
+            if args.action == "buy":
+                _print(us_stab.buy_leg(c, symbol=sym, live=args.live))
+            elif args.action == "sell":
+                _print(us_stab.sell_leg(c, symbol=sym, live=args.live))
         elif args.cmd == "investor":
             print(investor.download_basket(c, daily.VALUE_BASKET))
         elif args.cmd == "investoracc":
