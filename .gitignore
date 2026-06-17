@@ -21,3 +21,6 @@ venv/
 
 # OS
 .DS_Store
+
+# 진단/스크래치 출력
+*_diag.txt
