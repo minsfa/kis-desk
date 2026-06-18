@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from .client import KisClient
 from . import overseas
 from .regime import _us_closes
-from .config import PROJECT_ROOT
+from .config import PROJECT_ROOT, US_EXCH
 from .safety import SafetyError
 from .logging_util import log_event
 
@@ -25,7 +25,9 @@ LEDGER = DIR / "ledger.csv"
 
 # ---- 튜닝 ----
 BUDGET_USD = 660.0                         # 월 예산(100만원 ≈ $660)
-UNIVERSE = [("XLE", "AMS", 0.70), ("XOM", "NYS", 0.30)]  # (티커, 거래소, 기본비중)
+# (티커, 주문거래소 OVRS_EXCG_CD, 기본비중). 주문/잔고는 이 코드(NASD/NYSE/AMEX),
+# 시세조회(_us_closes/get_price)는 US_EXCH로 시세코드(NAS/NYS/AMS)로 변환해 사용.
+UNIVERSE = [("XLE", "AMEX", 0.70), ("XOM", "NYSE", 0.30)]
 DIP_LOW, HIGH = 0.40, 0.80                # 최근 범위 내 위치: <0.4 딥강화 / >0.8 고점절반
 MONTHEND_DAY = 25                         # 이 날 이후엔 딥 없어도 월 적립 집행
 BUY_SLIP = 1.002                          # 체결되게 현재가 +0.2% 지정가
@@ -106,7 +108,7 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
     mon = {}
     for tk, excd, w in UNIVERSE:
         try:
-            cl = _us_closes(c, tk, excd)
+            cl = _us_closes(c, tk, US_EXCH.get(excd, excd))  # 주문코드→시세코드
             mon[tk] = {"last": cl[0] if cl else None, "pos": _position(cl)}
         except Exception as e:
             mon[tk] = {"err": str(e)}
@@ -191,7 +193,7 @@ def report(c: KisClient | None = None) -> str:
         tot_inv += d["usd"]
         if c is not None:
             try:
-                px = float(overseas.get_price(c, tk, dict(UNIVERSE_EXCH).get(tk, "AMS")).get("last") or 0)
+                px = float(overseas.get_price(c, tk, dict(UNIVERSE_EXCH).get(tk, "AMEX")).get("last") or 0)
                 if px > 0:
                     val = px * d["qty"]; tot_val += val
                     line += f" · 현재 ${px:.2f} → 평가 ${val:.0f} ({(val/d['usd']-1)*100:+.1f}%)"
