@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 import csv
+import subprocess
 from datetime import datetime, timedelta, timezone
 
 from .client import KisClient
@@ -23,11 +24,41 @@ DIR = PROJECT_ROOT / "data" / "dca"
 LEDGER = DIR / "ledger.csv"
 
 # ---- 튜닝 ----
-BUDGET_USD = 90.0                         # 월 예산(처음 소액; XLE 1주≈$55 매수. ₩100만≈$720은 MAX_ORDER_USD 상향 후 XOM 포함)
+BUDGET_USD = 660.0                         # 월 예산(100만원 ≈ $660)
 UNIVERSE = [("XLE", "AMS", 0.70), ("XOM", "NYS", 0.30)]  # (티커, 거래소, 기본비중)
 DIP_LOW, HIGH = 0.40, 0.80                # 최근 범위 내 위치: <0.4 딥강화 / >0.8 고점절반
 MONTHEND_DAY = 25                         # 이 날 이후엔 딥 없어도 월 적립 집행
 BUY_SLIP = 1.002                          # 체결되게 현재가 +0.2% 지정가
+
+
+# 실거래 직전 트레이딩 코드 무결성 게이트 — 커밋되지 않은 src/·전략 수정이 있으면
+# 라이브 주문을 거부한다. (예: 운영봇이 BUDGET/UNIVERSE 등을 임의 수정 → 검토 없이 집행되는 사고 차단)
+# 변경은 반드시 git 커밋(=사람 검토)을 거쳐야 라이브에 반영된다. 읽기/드라이런은 영향 없음.
+_GUARDED_PATHS = ["src", "config/strategy.json"]
+
+
+def _src_dirty() -> str | None:
+    """src/·전략 파일에 커밋 안 된 변경이 있으면 그 목록(문자열) 반환, 깨끗하면 None."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "status", "--porcelain", "--"] + _GUARDED_PATHS,
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode != 0:
+            return f"git 상태확인 실패: {out.stderr.strip() or 'rc=' + str(out.returncode)}"
+        dirty = out.stdout.strip()
+        return dirty or None
+    except Exception as e:
+        return f"git 확인 예외: {e}"
+
+
+def _assert_live_integrity():
+    dirty = _src_dirty()
+    if dirty:
+        raise SafetyError(
+            "트레이딩 코드 무결성 위반 — src/·전략에 커밋 안 된 변경 존재로 라이브 매매 거부.\n"
+            "  변경분을 커밋(사람 검토)한 뒤 재시도하세요.\n" + dirty
+        )
 
 
 def _month() -> str:
@@ -68,6 +99,8 @@ def _log(row: dict, live: bool = True):
 
 def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
     """매일 호출. 모니터링 + 조건 충족 시 월 1회 매수."""
+    if live:
+        _assert_live_integrity()   # 라이브일 때만: 커밋 안 된 트레이딩 코드 변경이면 거부
     ts = f"{datetime.now(KST):%Y-%m-%d %H:%M:%S}"
     # 1) 모니터링: 각 티커 현재가·위치
     mon = {}
