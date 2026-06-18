@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 
 from .client import KisClient
-from .config import TR_US_PRICE, US_EXCH
+from .config import TR_US_PRICE, US_EXCH, US_EXCH_DAY
 from .safety import check_order_usd, bump_count
 from .logging_util import log_event
 
@@ -21,8 +21,23 @@ PRICE_PATH = "/uapi/overseas-price/v1/quotations/price"
 KST = timezone(timedelta(hours=9))
 
 
-def get_price(c: KisClient, symb: str, excg: str = "NASD") -> dict:
-    excd = US_EXCH.get(excg, "NAS")
+def us_session(now: datetime | None = None) -> str:
+    """현재 KST 기준 미국 주문 세션.
+      'day' = 주간거래(10:00~16:00 KST, 주간 tr_id TTTS603xU, 지정가만, 일부종목만)
+      'reg' = 프리/정규/애프터(17:00~익일09:00, 정규 tr_id TTTT100xU)
+      'closed' = 그 외 틈(09:00~10:00, 16:00~17:00) — 주문 거부될 수 있음
+    """
+    n = now or datetime.now(KST)
+    hm = n.hour * 60 + n.minute
+    if 10 * 60 <= hm < 16 * 60:
+        return "day"
+    if hm >= 17 * 60 or hm < 9 * 60:
+        return "reg"
+    return "closed"
+
+
+def get_price(c: KisClient, symb: str, excg: str = "NASD", daytime: bool = False) -> dict:
+    excd = (US_EXCH_DAY if daytime else US_EXCH).get(excg, "NAS")
     d = c.get(PRICE_PATH, TR_US_PRICE, {"AUTH": "", "EXCD": excd, "SYMB": symb})
     o = d.get("output", {}) or {}
     res = {"symbol": symb, "excg": excg, "last": o.get("last"),
@@ -67,12 +82,16 @@ def can_buy(c: KisClient, symb: str, price: float, excg: str = "NASD") -> dict:
 
 
 def _order(c: KisClient, side: str, symb: str, qty: int, price: float,
-           excg: str = "NASD", live: bool = False) -> dict:
+           excg: str = "NASD", live: bool = False, daytime: bool | None = None) -> dict:
     s = c.s
+    # daytime=None이면 현재 KST 세션으로 자동결정(낮10~16시=주간거래, 그 외=정규)
+    is_day = us_session() == "day" if daytime is None else daytime
+    action = side + ("_day" if is_day else "")  # buy/sell → buy_day/sell_day
+    tr_id = s.tr_us(action)
     est = price
     if est <= 0:
         try:
-            est = float(get_price(c, symb, excg)["last"])
+            est = float(get_price(c, symb, excg, daytime=is_day)["last"])
         except Exception:
             est = 0.0
     check_order_usd(s, side, symb, qty, est)
@@ -82,13 +101,13 @@ def _order(c: KisClient, side: str, symb: str, qty: int, price: float,
             "OVRS_ORD_UNPR": f"{price:.2f}", "ORD_SVR_DVSN_CD": "0", "ORD_DVSN": "00"}
     plan = {"market": "US", "env": s.env, "side": side, "symbol": symb, "excg": excg,
             "qty": qty, "price": f"{price:.2f}", "est_usd": round(qty * est, 2),
-            "tr_id": s.tr_us(side)}
+            "session": "day" if is_day else "reg", "tr_id": tr_id}
 
     if s.dry_run or not live:
         log_event("us_order", mode="dry-run", **plan)
         return {"dry_run": True, **plan}
 
-    data = c.post(ORDER_PATH, s.tr_us(side), body, use_hashkey=True)
+    data = c.post(ORDER_PATH, tr_id, body, use_hashkey=True)
     ok = str(data.get("rt_cd", "1")) == "0"
     out = data.get("output", {}) or {}
     res = {"dry_run": False, "ok": ok, "order_no": out.get("ODNO"),
@@ -139,12 +158,12 @@ def today_orders(c: KisClient, excg: str = "NASD") -> list[dict]:
     return rows
 
 
-def buy(c, symb, qty, price, excg="NASD", live=False):
-    return _order(c, "buy", symb, qty, price, excg, live)
+def buy(c, symb, qty, price, excg="NASD", live=False, daytime=None):
+    return _order(c, "buy", symb, qty, price, excg, live, daytime)
 
 
-def sell(c, symb, qty, price, excg="NASD", live=False):
-    return _order(c, "sell", symb, qty, price, excg, live)
+def sell(c, symb, qty, price, excg="NASD", live=False, daytime=None):
+    return _order(c, "sell", symb, qty, price, excg, live, daytime)
 
 
 # 저가 일반(비레버리지) 미국 ETF 후보 — (심볼, 이름, 주문거래소코드)

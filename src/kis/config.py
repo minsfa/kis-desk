@@ -44,11 +44,14 @@ TR_US = {
     "vts": {"buy": "VTTT1002U", "sell": "VTTT1001U", "balance": "VTTS3012R",
             "psamount": "VTTS3007R", "ccnl": "VTTS3035R", "cancel": "VTTT1004U"},
     "prod": {"buy": "TTTT1002U", "sell": "TTTT1006U", "balance": "TTTS3012R",
-             "psamount": "TTTS3007R", "ccnl": "TTTS3035R", "cancel": "TTTT1004U"},
+             "psamount": "TTTS3007R", "ccnl": "TTTS3035R", "cancel": "TTTT1004U",
+             # 미국 주간거래(한국 낮 10:00~16:00 KST, 지정가만, 일부 종목만). KIS 공식 거래코드.
+             "buy_day": "TTTS6036U", "sell_day": "TTTS6037U", "cancel_day": "TTTS6038U"},
 }
 TR_US_PRICE = "HHDFS00000300"
-# 거래소: 주문·잔고용 OVRS_EXCG_CD → 현재가용 EXCD 매핑
+# 거래소: 주문·잔고용 OVRS_EXCG_CD → 현재가용 EXCD 매핑 (정규 / 주간)
 US_EXCH = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
+US_EXCH_DAY = {"NASD": "BAQ", "NYSE": "BAY", "AMEX": "BAA"}  # 주간거래 현재가 EXCD
 
 
 def _bool(v: str | None, default: bool) -> bool:
@@ -75,7 +78,11 @@ class Settings:
         return HOSTS[self.env]
 
     def tr_us(self, action: str) -> str:
-        return TR_US[self.env][action]
+        m = TR_US[self.env]
+        if action in m:
+            return m[action]
+        # 주간거래 코드(buy_day 등)가 없는 환경(예: 모의)은 정규 코드로 폴백
+        return m[action.replace("_day", "")]
 
     @property
     def rate_per_sec(self) -> int:
