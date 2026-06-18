@@ -23,7 +23,7 @@ import sys
 
 from .kis.config import load_settings
 from .kis.client import KisClient
-from .kis import market, orders, screener, report, overseas, poc, krpoc, poc_all, pricelog, pricelog_par, daily, investor, papertest, strat_v0, propose, place, minbars, auctionmon, fundamentals, nav, overlay, scorecard, quality, growth, portfolio, us_stab, regime, dca
+from .kis import market, orders, screener, report, overseas, poc, krpoc, poc_all, pricelog, pricelog_par, daily, investor, papertest, strat_v0, propose, place, minbars, auctionmon, fundamentals, nav, overlay, scorecard, quality, growth, portfolio, us_stab, regime, dca, macro
 from .kis.safety import SafetyError
 
 
@@ -119,6 +119,8 @@ def main(argv=None):
                    help="보유 포트폴리오 점검(읽기전용, 종목별 가치/질/수급/공시 + 제안)")
     sub.add_parser("regime", parents=[common],
                    help="레짐·로테이션 대시보드(KR+US ETF 상대강도, 오건영 갈림길 참고)")
+    sub.add_parser("macro", parents=[common],
+                   help="에너지 거시 가치 오버레이(WTI/원유재고/배당수익률 + 가치배수, 읽기전용)")
     p_us = sub.add_parser("usstab", parents=[common],
                           help="H1 하버스 — 미국 기계적 왕복 안정성 테스트(buy/sell/report)")
     p_us.add_argument("action", choices=["buy", "sell", "report"])
@@ -433,6 +435,8 @@ def main(argv=None):
             print(portfolio.report(c))
         elif args.cmd == "regime":
             print(regime.dashboard(c))
+        elif args.cmd == "macro":
+            print(macro.report())
         elif args.cmd == "dca":
             if args.action == "check":
                 _print(dca.check(c, budget=(args.budget or dca.BUDGET_USD), live=args.live))
