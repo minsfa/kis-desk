@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 import csv
+import statistics
 import subprocess
 from datetime import datetime, timedelta, timezone
 
@@ -68,11 +69,78 @@ def _month() -> str:
 
 
 def _position(cl: list[float]) -> float | None:
-    """최근 ~5개월 범위 내 위치(0=바닥,1=천장)."""
+    """[구버전, 미사용] 최근 범위 내 위치. min-max는 추세장에 약해 _strength로 대체됨."""
     if len(cl) < 20:
         return None
     lo, hi = min(cl), max(cl)
     return (cl[0] - lo) / (hi - lo) if hi > lo else 0.5
+
+
+# === 추세인지 가치 사이징 (Discussion #8) — min-max 대체 ===
+# 핵심: 변동성 정규화 z-score(딥) × 추세 댐퍼(falling knife 방지) × 상대강도 틸트.
+Z_WIN = 20            # z-score 윈도우(일)
+Z_FULL = 2.0          # |z|=2σ에서 최대 보정
+DIP_MAX = 2.0         # 최저 z(쌈)에서 매수배수 상한
+TREND_N = 90          # 추세 MA(일). KIS 해외일봉 ~100개 상한 → 200일 대신 90일
+SLOPE_SHIFT = 5       # 추세 기울기 판정용 시프트
+RS_LB = 63            # 상대강도 룩백(~3개월)
+RS_FAST = 50          # XLE/XLK 비율 추세 MA
+DIP_TRIGGER = 1.15    # 블렌드 강도 이 이상이면 월중에도 즉시 매수(좋은 진입)
+STRENGTH_CAP = 1.8    # 월 총지출 = budget×블렌드강도, 상한(자금/리스크 통제)
+
+
+def _zfactor(cl: list[float]) -> tuple[float, float | None]:
+    """z-score 딥팩터 [0.5,2.0]. 싸면(z<0)>1, 비싸면(z>0)<1. 변동성 정규화라 범위 드리프트 면역."""
+    if len(cl) < Z_WIN:
+        return 1.0, None
+    win = cl[:Z_WIN]
+    mu = statistics.fmean(win)
+    sd = statistics.pstdev(win)
+    if sd == 0:
+        return 1.0, 0.0
+    z = (cl[0] - mu) / sd
+    if z <= 0:
+        f = 1.0 + (DIP_MAX - 1.0) * min(1.0, -z / Z_FULL)   # [1.0, 2.0]
+    else:
+        f = 1.0 - 0.5 * min(1.0, z / Z_FULL)                # [0.5, 1.0]
+    return f, round(z, 2)
+
+
+def _trendfactor(cl: list[float]) -> tuple[float, str]:
+    """추세 댐퍼: 가격<하락중 MA=하락추세 0.5(falling knife 방지) / 가격<상승 MA=눌림 0.8 / 상승 1.0."""
+    if len(cl) < TREND_N + SLOPE_SHIFT:
+        return 1.0, "n/a"
+    sma_now = statistics.fmean(cl[:TREND_N])
+    sma_prev = statistics.fmean(cl[SLOPE_SHIFT:SLOPE_SHIFT + TREND_N])
+    below = cl[0] < sma_now
+    falling = sma_now < sma_prev
+    if below and falling:
+        return 0.5, "하락추세"
+    if below:
+        return 0.8, "눌림"
+    return 1.0, "상승"
+
+
+def _rsfactor(cl: list[float], spy: list[float], xlk: list[float]) -> tuple[float, str]:
+    """상대강도 틸트: 에너지가 SPY 대비 우위 & XLE/XLK 비율>50일선 → 1.2 / 열위 → 0.85 / 중립 1.0."""
+    if len(cl) <= RS_LB or len(spy) <= RS_LB or len(xlk) < RS_FAST:
+        return 1.0, "n/a"
+    relret = (cl[0] / cl[RS_LB]) / (spy[0] / spy[RS_LB]) - 1
+    n = min(len(cl), len(xlk), RS_FAST)
+    ratio = [cl[i] / xlk[i] for i in range(n)]
+    up = relret > 0 and ratio[0] > statistics.fmean(ratio)
+    dn = relret < 0 and ratio[0] < statistics.fmean(ratio)
+    return (1.2 if up else (0.85 if dn else 1.0)), f"vsSPY{relret*100:+.0f}%"
+
+
+def _strength(cl: list[float], spy: list[float], xlk: list[float]) -> tuple[float, dict]:
+    """종목 매수강도 = 딥 × 추세 × RS, [0.3,2.5]. (강도, 상세)."""
+    dipf, z = _zfactor(cl)
+    trf, trs = _trendfactor(cl)
+    rsf, rss = _rsfactor(cl, spy, xlk)
+    s = max(0.3, min(2.5, dipf * trf * rsf))
+    return s, {"z": z, "dip": round(dipf, 2), "trend": trf, "trend_s": trs,
+               "rs": rsf, "rs_s": rss}
 
 
 def _ledger_rows() -> list[dict]:
@@ -104,46 +172,56 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
     if live:
         _assert_live_integrity()   # 라이브일 때만: 커밋 안 된 트레이딩 코드 변경이면 거부
     ts = f"{datetime.now(KST):%Y-%m-%d %H:%M:%S}"
-    # 1) 모니터링: 각 티커 현재가·위치
+    # 1) 모니터링 + 추세인지 가치 사이징. SPY/XLK는 상대강도 벤치마크(1회 조회).
+    try:
+        spy = _us_closes(c, "SPY", "AMS")
+        xlk = _us_closes(c, "XLK", "AMS")
+    except Exception:
+        spy, xlk = [], []
     mon = {}
+    strengths = {}
     for tk, excd, w in UNIVERSE:
         try:
             cl = _us_closes(c, tk, US_EXCH.get(excd, excd))  # 주문코드→시세코드
-            mon[tk] = {"last": cl[0] if cl else None, "pos": _position(cl)}
+            if not cl:
+                mon[tk] = {"err": "시세없음"}; continue
+            s, detail = _strength(cl, spy, xlk)
+            strengths[tk] = s
+            mon[tk] = {"last": cl[0], "strength": round(s, 2), **detail}
         except Exception as e:
             mon[tk] = {"err": str(e)}
-    poss = [m["pos"] for m in mon.values() if m.get("pos") is not None]
-    if not poss:
+    if not strengths:
         return {"skip": "시세 없음(미국장 마감/조회불가)", "mon": mon}
-    avg_pos = sum(poss) / len(poss)
 
     # 2) 이번 달 이미 매수?
     if _bought_this_month():
-        return {"status": "이번달 매수 완료", "month": _month(), "avg_pos": round(avg_pos, 2), "mon": mon}
+        return {"status": "이번달 매수 완료", "month": _month(), "mon": mon}
 
-    # 3) 매수 강도/타이밍
-    is_dip = avg_pos < DIP_LOW
-    is_high = avg_pos > HIGH
-    strength = 1.2 if is_dip else (0.5 if is_high else 1.0)
+    # 3) 블렌드 강도(=월 총지출 배수) + 매수 타이밍
+    wsum = sum(w for tk, _, w in UNIVERSE if tk in strengths)
+    blended = sum(w * strengths[tk] for tk, _, w in UNIVERSE if tk in strengths) / (wsum or 1)
     near_monthend = datetime.now(KST).day >= MONTHEND_DAY
-    if not (is_dip or near_monthend):
-        return {"status": "대기(딥 기다리는 중)", "avg_pos": round(avg_pos, 2),
-                "note": f"딥<{DIP_LOW} 또는 {MONTHEND_DAY}일 이후 집행", "mon": mon}
+    if not (blended >= DIP_TRIGGER or near_monthend):
+        return {"status": "대기(좋은 진입 기다리는 중)", "blended": round(blended, 2),
+                "note": f"블렌드강도<{DIP_TRIGGER}(저평가 약함) 또는 {MONTHEND_DAY}일 이후 집행",
+                "mon": mon}
 
-    # 4) 매수 실행
-    reason = "딥강화" if is_dip else ("월말집행" if near_monthend else "정상")
+    # 4) 매수 실행 — 종목별 강도로 사이징(falling knife 자동 축소). 총지출은 STRENGTH_CAP로 캡.
+    scale = min(1.0, STRENGTH_CAP / blended) if blended > 0 else 1.0
+    reason = "딥강화" if blended >= DIP_TRIGGER else "월말집행"
     placed = []
     for tk, excd, w in UNIVERSE:
         m = mon.get(tk, {})
         px = m.get("last")
         if not px:
             placed.append({"ticker": tk, "skip": "시세없음"}); continue
-        target = budget * strength * w
+        strength = round(strengths.get(tk, 1.0) * scale, 3)   # 종목별 유효강도
+        target = budget * w * strength
         qty = int(target // px)
         if qty < 1:
             _log({"ts": ts, "month": _month(), "action": "skip", "ticker": tk, "price": px,
-                  "usd": round(target, 2), "strength": strength, "pos": round(m.get("pos") or 0, 2),
-                  "note": f"예산부족(<1주, 강도{strength})"}, live)
+                  "usd": round(target, 2), "strength": round(strength, 2), "pos": m.get("z"),
+                  "note": f"예산부족(<1주, 강도{round(strength,2)})"}, live)
             placed.append({"ticker": tk, "skip": f"예산부족(target ${target:.0f} < 1주 ${px:.0f})"})
             continue
         limit = round(px * BUY_SLIP, 2)
@@ -151,8 +229,8 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
             res = overseas.buy(c, tk, qty, limit, excg=excd, live=live)
             ok = bool(res.get("ok") or res.get("dry_run"))
             _log({"ts": ts, "month": _month(), "action": "buy", "ticker": tk, "qty": qty,
-                  "price": limit, "usd": round(qty * limit, 2), "strength": strength,
-                  "pos": round(m.get("pos") or 0, 2),
+                  "price": limit, "usd": round(qty * limit, 2), "strength": round(strength, 2),
+                  "pos": m.get("z"),
                   "note": f"{reason} {res.get('order_no','')}"}, live)
             placed.append({"ticker": tk, "ok": ok, "qty": qty, "limit": limit,
                            "order_no": res.get("order_no"), "dry_run": res.get("dry_run")})
@@ -162,8 +240,8 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
             placed.append({"ticker": tk, "blocked": str(e)})
         except Exception as e:
             placed.append({"ticker": tk, "error": str(e)})
-    return {"status": f"매수 실행({reason}, 강도{strength})", "avg_pos": round(avg_pos, 2),
-            "budget": budget, "placed": placed}
+    return {"status": f"매수 실행({reason}, 블렌드강도{round(blended,2)})",
+            "blended": round(blended, 2), "budget": budget, "placed": placed}
 
 
 def report(c: KisClient | None = None) -> str:
