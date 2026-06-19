@@ -87,6 +87,7 @@ RS_LB = 63            # 상대강도 룩백(~3개월)
 RS_FAST = 50          # XLE/XLK 비율 추세 MA
 DIP_TRIGGER = 1.15    # 블렌드 강도 이 이상이면 월중에도 즉시 매수(좋은 진입)
 STRENGTH_CAP = 1.8    # 월 총지출 = budget×블렌드강도, 상한(자금/리스크 통제)
+USE_VALUATION = True  # 거시 가치 오버레이(macro.valuation_factor) 적용. False면 기술적 사이징만
 
 
 def _zfactor(cl: list[float]) -> tuple[float, float | None]:
@@ -197,6 +198,16 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
     if _bought_this_month():
         return {"status": "이번달 매수 완료", "month": _month(), "mon": mon}
 
+    # 2.5) 거시 가치 오버레이(섹터 공통배수). 실패하면 1.0 중립(매매 안 막음).
+    val_f, val_why = 1.0, ["오버레이 꺼짐"]
+    if USE_VALUATION:
+        try:
+            from . import macro
+            val_f, val_why = macro.valuation_factor()
+        except Exception as e:
+            val_f, val_why = 1.0, [f"macro 오류→중립({e})"]
+        strengths = {tk: max(0.3, min(2.5, s * val_f)) for tk, s in strengths.items()}
+
     # 3) 블렌드 강도(=월 총지출 배수) + 매수 타이밍
     wsum = sum(w for tk, _, w in UNIVERSE if tk in strengths)
     blended = sum(w * strengths[tk] for tk, _, w in UNIVERSE if tk in strengths) / (wsum or 1)
@@ -241,7 +252,8 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
         except Exception as e:
             placed.append({"ticker": tk, "error": str(e)})
     return {"status": f"매수 실행({reason}, 블렌드강도{round(blended,2)})",
-            "blended": round(blended, 2), "budget": budget, "placed": placed}
+            "blended": round(blended, 2), "valuation": round(val_f, 2),
+            "val_why": val_why, "budget": budget, "placed": placed}
 
 
 def report(c: KisClient | None = None) -> str:
