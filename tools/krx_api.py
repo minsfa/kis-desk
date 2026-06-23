@@ -24,6 +24,10 @@ import requests
 KRX_STK_BYDD = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
 KRX_ETF_BYDD = "https://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
 KRX_ETN_BYDD = "https://data-dbg.krx.co.kr/svc/apis/etp/etn_bydd_trd"
+KRX_GOLD_BYDD = "https://data-dbg.krx.co.kr/svc/apis/gen/gold_bydd_trd"
+
+# 금현물 시장 — 우리가 추적할 대표 종목(금 99.99_1kg).
+GOLD_1KG = "04020000"
 
 # 반도체 쏠림 계산용 (삼성전자 / SK하이닉스)
 SAMSUNG = "005930"
@@ -89,6 +93,21 @@ def fetch_etn_bydd(bas_dd: str, key: str | None = None, timeout: int = 15) -> li
     return r.json().get("OutBlock_1") or []
 
 
+def fetch_gold_bydd(bas_dd: str, key: str | None = None, timeout: int = 15) -> list[dict]:
+    """basDd(YYYYMMDD) 하루치 KRX 금현물 시장 전 종목 원본 행 리스트 반환.
+    데이터 없음(주말/휴일/당일/미갱신)이면 빈 리스트. 키 없으면 RuntimeError.
+    주요 필드: ISU_CD,ISU_NM,TDD_CLSPRC(종가 원/g),FLUC_RT(등락률%),
+      ACC_TRDVOL(거래량 g),ACC_TRDVAL(거래대금 원)."""
+    if key is None:
+        key = _auth_key()
+    if not key:
+        raise RuntimeError("KRX_AUTH_KEY 없음 (config/.env 확인)")
+    r = requests.get(KRX_GOLD_BYDD, headers={"AUTH_KEY": key},
+                     params={"basDd": bas_dd}, timeout=timeout)
+    r.raise_for_status()
+    return r.json().get("OutBlock_1") or []
+
+
 def _i(v) -> int | None:
     """문자열 정수 → int, 실패/빈값 시 None."""
     try:
@@ -142,3 +161,13 @@ def fetch_kospi_metrics(bas_dd: str, key: str | None = None) -> dict | None:
     """basDd 하루치 KOSPI 집계 지표 반환. 데이터 없으면 None (graceful)."""
     rows = fetch_stk_bydd(bas_dd, key=key)
     return aggregate_kospi(rows)
+
+
+def fetch_gold(bas_dd: str, key: str | None = None) -> int | None:
+    """basDd 하루치 금 99.99_1kg(ISU_CD=04020000) 종가(원/g, int) 반환.
+    데이터 없음(주말/휴일/당일/미갱신)·해당 종목 없음·종가 파싱 실패면 None (graceful)."""
+    rows = fetch_gold_bydd(bas_dd, key=key)
+    for r in rows:
+        if r.get("ISU_CD") == GOLD_1KG:
+            return _i(r.get("TDD_CLSPRC"))
+    return None
