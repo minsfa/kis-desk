@@ -22,6 +22,8 @@ from pathlib import Path
 import requests
 
 KRX_STK_BYDD = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
+KRX_ETF_BYDD = "https://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
+KRX_ETN_BYDD = "https://data-dbg.krx.co.kr/svc/apis/etp/etn_bydd_trd"
 
 # 반도체 쏠림 계산용 (삼성전자 / SK하이닉스)
 SAMSUNG = "005930"
@@ -51,6 +53,37 @@ def fetch_stk_bydd(bas_dd: str, key: str | None = None, timeout: int = 15) -> li
     if not key:
         raise RuntimeError("KRX_AUTH_KEY 없음 (config/.env 확인)")
     r = requests.get(KRX_STK_BYDD, headers={"AUTH_KEY": key},
+                     params={"basDd": bas_dd}, timeout=timeout)
+    r.raise_for_status()
+    return r.json().get("OutBlock_1") or []
+
+
+def fetch_etf_bydd(bas_dd: str, key: str | None = None, timeout: int = 15) -> list[dict]:
+    """basDd(YYYYMMDD) 하루치 ETF 전 종목 원본 행 리스트 반환.
+    데이터 없음(주말/휴일/당일/미갱신)이면 빈 리스트. 키 없으면 RuntimeError.
+    주요 필드: ISU_CD,ISU_NM,TDD_CLSPRC,NAV,ACC_TRDVOL,ACC_TRDVAL(거래대금 원),
+      MKTCAP,INVSTASST_NETASST_TOTAMT(순자산총액=AUM 원),LIST_SHRS,
+      IDX_IND_NM(기초지수명),FLUC_RT(등락률)."""
+    if key is None:
+        key = _auth_key()
+    if not key:
+        raise RuntimeError("KRX_AUTH_KEY 없음 (config/.env 확인)")
+    r = requests.get(KRX_ETF_BYDD, headers={"AUTH_KEY": key},
+                     params={"basDd": bas_dd}, timeout=timeout)
+    r.raise_for_status()
+    return r.json().get("OutBlock_1") or []
+
+
+def fetch_etn_bydd(bas_dd: str, key: str | None = None, timeout: int = 15) -> list[dict]:
+    """basDd(YYYYMMDD) 하루치 ETN 전 종목 원본 행 리스트 반환.
+    데이터 없음이면 빈 리스트. 키 없으면 RuntimeError.
+    주요 필드: ISU_CD,ISU_NM,TDD_CLSPRC,PER1SECU_INDIC_VAL(주당지표가치),
+      ACC_TRDVAL,MKTCAP,INDIC_VAL_AMT(지표가치총액≈AUM),LIST_SHRS,IDX_IND_NM,FLUC_RT."""
+    if key is None:
+        key = _auth_key()
+    if not key:
+        raise RuntimeError("KRX_AUTH_KEY 없음 (config/.env 확인)")
+    r = requests.get(KRX_ETN_BYDD, headers={"AUTH_KEY": key},
                      params={"basDd": bas_dd}, timeout=timeout)
     r.raise_for_status()
     return r.json().get("OutBlock_1") or []
