@@ -36,13 +36,37 @@ def us_session(now: datetime | None = None) -> str:
     return "closed"
 
 
-def get_price(c: KisClient, symb: str, excg: str = "NASD", daytime: bool = False) -> dict:
+def _price_one(c: KisClient, symb: str, excg: str, daytime: bool) -> dict:
+    """단일 거래소 현재가 1회 조회(폴백 없음)."""
     excd = (US_EXCH_DAY if daytime else US_EXCH).get(excg, "NAS")
     d = c.get(PRICE_PATH, TR_US_PRICE, {"AUTH": "", "EXCD": excd, "SYMB": symb})
     o = d.get("output", {}) or {}
-    res = {"symbol": symb, "excg": excg, "last": o.get("last"),
-           "rate": o.get("rate"), "base": o.get("base"), "tvol": o.get("tvol"),
-           "orderable": o.get("ordy")}
+    return {"symbol": symb, "excg": excg, "last": o.get("last"),
+            "rate": o.get("rate"), "base": o.get("base"), "tvol": o.get("tvol"),
+            "orderable": o.get("ordy")}
+
+
+def _has_price(res: dict) -> bool:
+    """유효한 현재가가 있는지(빈값/0 제외)."""
+    try:
+        return float(res.get("last") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def get_price(c: KisClient, symb: str, excg: str = "NASD", daytime: bool = False) -> dict:
+    """미국 현재가. 주어진(기본 NASD) 거래소가 빈값이면 NASD→NYSE→AMEX 순으로
+    자동 재시도해 첫 유효 시세를 반환(XLE=AMEX, XOM=NYSE 등 비나스닥 종목도 그냥 조회됨)."""
+    res = _price_one(c, symb, excg, daytime)
+    if not _has_price(res):
+        # 폴백: 요청 거래소를 맨 앞에, 나머지 표준 거래소를 순서대로(중복 제외)
+        for ex in ([excg] + [e for e in ("NASD", "NYSE", "AMEX") if e != excg]):
+            if ex == excg:
+                continue
+            alt = _price_one(c, symb, ex, daytime)
+            if _has_price(alt):
+                res = alt
+                break
     log_event("us_price", **res)
     return res
 
