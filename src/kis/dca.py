@@ -276,21 +276,53 @@ def report(c: KisClient | None = None) -> str:
     for r in rows:
         d = by_tk.setdefault(r["ticker"], {"qty": 0, "usd": 0.0})
         d["qty"] += int(float(r["qty"])); d["usd"] += float(r["usd"])
-    tot_inv = 0.0; tot_val = 0.0
+
+    # 현재가는 해외 잔고(usbalance)의 보유별 now_price에서 가져온다 — 거래소 무관·정확.
+    # (단일 시세 호출은 종목 상장 거래소가 기본값과 다르면 빈값→0→합계 왜곡되므로 사용 안 함.)
+    now_by_tk: dict[str, float] = {}
+    if c is not None:
+        for excg in ("NASD", "NYSE", "AMEX"):   # 잔고는 거래소별 조회 — 보유 종목이 흩어져 있어 모두 합침
+            try:
+                bal = overseas.get_balance(c, excg=excg)
+            except Exception:
+                continue
+            for h in bal.get("holdings", []):
+                sym = h.get("symbol")
+                try:
+                    px = float(h.get("now_price") or 0)
+                except (TypeError, ValueError):
+                    px = 0.0
+                if sym and px > 0:
+                    now_by_tk[sym] = px
+
+    tot_inv = 0.0
+    tot_val = 0.0          # 현재가를 구한 종목들의 평가 합
+    tot_val_inv = 0.0      # 그 종목들의 투입 합(손익률을 같은 모수로 계산하려고 분리)
+    have_price = False
     for tk, d in by_tk.items():
         avg = d["usd"] / d["qty"] if d["qty"] else 0
         line = f"   {tk}: {d['qty']}주 · 평단 ${avg:.2f} · 투입 ${d['usd']:.0f}"
         tot_inv += d["usd"]
-        if c is not None:
-            try:
-                px = float(overseas.get_price(c, tk, dict(UNIVERSE_EXCH).get(tk, "AMEX")).get("last") or 0)
-                if px > 0:
-                    val = px * d["qty"]; tot_val += val
-                    line += f" · 현재 ${px:.2f} → 평가 ${val:.0f} ({(val/d['usd']-1)*100:+.1f}%)"
-            except Exception:
-                pass
+        px = now_by_tk.get(tk, 0.0)
+        if px > 0:
+            val = px * d["qty"]
+            tot_val += val
+            tot_val_inv += d["usd"]
+            have_price = True
+            line += f" · 현재 ${px:.2f} → 평가 ${val:.0f} ({(val/d['usd']-1)*100:+.1f}%)"
+        elif c is not None:
+            # 현재가 미상 — 거짓 -%를 만들지 않는다. 평단가로 대체 표기(평가는 합계에서 제외).
+            line += " · 현재가 미상(잔고에 없음)"
         L.append(line)
-    L.append(f"  총 투입 ${tot_inv:.0f}" + (f" · 총 평가 ${tot_val:.0f} ({(tot_val/tot_inv-1)*100:+.1f}%)" if tot_val else ""))
+
+    summary = f"  총 투입 ${tot_inv:.0f}"
+    if have_price:
+        # 손익률은 현재가를 구한 종목들의 투입(tot_val_inv) 대비로만 계산 — 미상 종목이 섞여도 왜곡 없음.
+        pnl = (tot_val / tot_val_inv - 1) * 100 if tot_val_inv else 0.0
+        summary += f" · 총 평가 ${tot_val:.0f} ({pnl:+.1f}%)"
+        if tot_val_inv < tot_inv:   # 일부 종목 현재가 미상 → 평가 합은 부분 합임을 명시
+            summary += " · 일부 현재가 미상(평가/손익은 시세 확인분만)"
+    L.append(summary)
     L.append(f"💾 {LEDGER}")
     return "\n".join(L)
 
