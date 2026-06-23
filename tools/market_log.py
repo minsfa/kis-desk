@@ -54,6 +54,7 @@ sys.path.insert(0, str(ROOT))
 
 from tools.credit_check import fetch_rows as _credit_fetch_rows  # KOFIA 재사용
 from tools import krx_api  # KRX OPEN API (2단계 칼럼)
+from tools import levetf_watch  # 단일종목 레버리지 ETF/ETN 합계(시계열 칼럼)
 
 KST = timezone(timedelta(hours=9))
 DATA_DIR = ROOT / "data" / "market"
@@ -74,9 +75,14 @@ COLUMNS = [
     # 2단계: KRX 계정 後 채움 (지금은 공란, 자리만)
     "kospi_mktcap", "kospi_value", "turnover",
     "credit_ratio", "semi_val_share", "pension_net",
+    # 3단계: 단일종목(삼성·하이닉스) 레버리지 ETF+ETN 추적 (KRX ETP API, 끝에 append)
+    #   levetf_val  = 삼성+하이닉스 단일종목 레버리지/인버스 ETF+ETN 총거래대금, 조원
+    #   levetf_turn = 그 상품들 거래대금가중 평균 회전율, %
+    "levetf_val", "levetf_turn",
 ]
 STAGE2 = {"kospi_mktcap", "kospi_value", "turnover",
-          "credit_ratio", "semi_val_share", "pension_net"}
+          "credit_ratio", "semi_val_share", "pension_net",
+          "levetf_val", "levetf_turn"}
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -313,6 +319,25 @@ def _collect(days: int) -> tuple[dict[str, dict], list[str]]:
         if krx_fail:
             warns.append(f"KRX 실패 {krx_fail}건 — 해당 날짜만 공란, 나머지는 채움.")
 
+        # 3단계: 단일종목(삼성·하이닉스) 레버리지 ETF+ETN 총거래대금·가중회전율.
+        #   ETF/ETN 일별 전종목을 다시 받으므로 KOSPI 와 별도 try/except.
+        #   빈 배열(주말/휴일/당일/미갱신)·상품 0개면 공란 유지(graceful).
+        lev_fail = 0
+        for dt in sorted(rows_by_date):
+            try:
+                agg = levetf_watch.collect_aggregate(dt, key=key)
+            except Exception as e:
+                lev_fail += 1
+                warns.append(f"레버리지ETF {dt} 실패 — levetf_* 공란: {str(e)[:60]}")
+                continue
+            if not agg:  # 데이터 없음/상품 0개 → 공란 유지
+                continue
+            _merge_stage2(rows_by_date, dt,
+                          levetf_val=_round((agg["total_val"] or 0) / 1e12, 4),
+                          levetf_turn=_round(agg["wavg_turn"], 2))
+        if lev_fail:
+            warns.append(f"레버리지ETF 실패 {lev_fail}건 — 해당 날짜만 공란.")
+
     return rows_by_date, warns
 
 
@@ -497,8 +522,20 @@ def cmd_show(n: int):
               f"{_pct_s(r.get('credit_ratio'), 3):>10} "
               f"{_pct_s(r.get('semi_val_share'), 2):>11} "
               f"{_num_s(r.get('pension_net')) if r.get('pension_net') else '—':>7}")
-    print("\n※ pension_net(연기금 순매수)·레버리지ETF 는 투자자별/ETF 전용 API 가 "
-          "현재 KRX OPEN API 승인 범위 밖 → 공란.")
+
+    # ── 3단계: 단일종목(삼성·하이닉스) 레버리지 ETF+ETN 추적 ───────────────
+    print("\n[3단계 / 단일종목 레버리지 ETP] 삼성·하이닉스 단일종목 레버리지/인버스 "
+          "ETF+ETN 총거래대금=조원, 가중평균회전율=%")
+    h3 = f"{'일자':>11} {'레버리지대금(조)':>16} {'레버리지회전율%':>16}"
+    print(h3)
+    print("─" * len(h3))
+    for r in recent:
+        print(f"{_fmt_date(r['date']):>11} "
+              f"{_num_s(r.get('levetf_val'), 4):>16} "
+              f"{_pct_s(r.get('levetf_turn'), 2):>16}")
+
+    print("\n※ pension_net(연기금 순매수)은 투자자별 API 가 KRX OPEN API 승인 범위 밖 → 공란.")
+    print("※ levetf_*(단일종목 레버리지) 상세는 tools/levetf_watch.py --show 참고.")
 
 
 # ─────────────────────────────────────────────────────────────────────────
