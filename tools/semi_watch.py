@@ -51,7 +51,9 @@ def main():
         try:
             a = analyze(c, code)
         except Exception as e:
-            lines.append(f"{nm}: 조회실패 {str(e)[:40]}"); continue
+            lines.append(f"  {nm}: 조회실패 {str(e)[:40]}"); continue
+        if a["px"] is None:   # 시세·일봉 둘 다 빈값(KIS 장중 일시오류) → 크래시 대신 스킵
+            lines.append(f"  {nm}: 조회불가(시세 빈값 — KIS 장중 일시오류 가능)"); continue
         sig = []
         if a["chg"] <= -3:
             sig.append("❄️급락"); tags.add("down")
