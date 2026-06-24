@@ -4,6 +4,7 @@
 import os
 import statistics
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo 루트
 
@@ -25,7 +26,9 @@ def _num(v):
 
 def analyze(c, code):
     f = get_fundamentals(c, code)
+    time.sleep(0.3)                 # KIS 초당 호출한도(연사 throttle) 회피
     cl = _kr_closes(c, code)
+    time.sleep(0.3)
     px = f.get("price") or (cl[0] if cl else None)
     chg = f.get("change_pct") or 0.0
     ma60 = statistics.fmean(cl[:60]) if len(cl) >= 60 else None
@@ -34,6 +37,7 @@ def analyze(c, code):
     if len(cl) >= 20:
         sd = statistics.pstdev(cl[:20])
         z = (cl[0] - statistics.fmean(cl[:20])) / sd if sd else 0.0
+    time.sleep(0.3)
     rows = investor.fetch(c, code)
     frgn5 = sum(_num(r.get("frgn_ntby_tr_pbmn")) for r in rows[:5]) / 100.0  # 억원
     return {
@@ -48,12 +52,19 @@ def main():
     c = KisClient(load_settings("prod"))
     lines, tags = [], set()
     for nm, code in STOCKS:
-        try:
-            a = analyze(c, code)
-        except Exception as e:
-            lines.append(f"  {nm}: 조회실패 {str(e)[:40]}"); continue
-        if a["px"] is None:   # 시세·일봉 둘 다 빈값(KIS 장중 일시오류) → 크래시 대신 스킵
-            lines.append(f"  {nm}: 조회불가(시세 빈값 — KIS 장중 일시오류 가능)"); continue
+        a = None
+        for _ in range(3):        # 빈값(KIS 연사 rate-limit 추정) → 잠시 쉬고 재시도
+            try:
+                a = analyze(c, code)
+            except Exception as e:
+                a = e; break
+            if a["px"] is not None:
+                break
+            time.sleep(1.2)
+        if isinstance(a, Exception):
+            lines.append(f"  {nm}: 조회실패 {str(a)[:40]}"); continue
+        if a is None or a["px"] is None:   # 재시도 후에도 빈값 → 크래시 대신 스킵
+            lines.append(f"  {nm}: 조회불가(시세 빈값 — 재시도 후에도, KIS 일시오류)"); continue
         sig = []
         if a["chg"] <= -3:
             sig.append("❄️급락"); tags.add("down")
