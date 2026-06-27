@@ -4,7 +4,8 @@
   C1 (눌림+매수벽): 대장주/저가ETF가 -dip% 도달 AND 호가 매수벽(통합 잔량비>=wall)일 때.
   C2 (전날급등→익일눌림): 전날 +surge%↑ 급등 종목 아침 스캔 → -dip% 보수 진입.
 브래킷: 매수 지정가 체결되면 '즉시' 목표가(+target%) 매도 지정가를 건다(걸어놓고 기다림).
-종목당 budget(원) 한도, 못 사면 스킵, 종목당 1회, 마감 전 미체결매도 취소+전량청산.
+종목당 budget(원) 한도, 못 사면 스킵, 종목당 1회, 마감 전 미체결주문 취소+자기체결분만 청산
+(계좌 기존 보유분은 절대 청산하지 않음 — 잔고 전체를 읽어 파는 짓 금지).
 통합(UN)·SOR → NXT 프리마켓(08:00~) 포함. 잔고기반 체결확인. live AND DRY_RUN=false 일때만 실주문. STOP파일=즉시중단.
 """
 from __future__ import annotations
@@ -67,16 +68,6 @@ def _nxt_ok(c, code) -> bool:
         return float((d.get("output", {}) or {}).get("stck_prpr") or 0) > 0
     except Exception:
         return False
-
-
-def _held(c, code):
-    for h in market.get_balance(c).get("holdings", []):
-        if h.get("code") == code:
-            try:
-                return int(float(h.get("qty") or 0))
-            except Exception:
-                return 0
-    return 0
 
 
 def _qty(price, budget):
@@ -264,7 +255,8 @@ def run(c, budget=None, dip=None, target=None, wall=None, surge=None,
                     pass
         time.sleep(poll)
 
-    if armed:  # 마감 전: 미체결 주문 취소 → 종목별 보유 1회 전량청산(안전망)
+    if armed:  # 마감 전: 미체결 주문 취소 → stratv0 '자기 체결분'만 청산(계좌 기존 보유분 보호)
+        fl = fills()  # 청산 시점 주문번호별 체결수량 스냅샷
         for L in legs.values():
             if L["st"] == "ORDERED" and L.get("ono"):
                 try:
@@ -274,15 +266,23 @@ def run(c, budget=None, dip=None, target=None, wall=None, surge=None,
             if L["st"] in ("SELL_PLACED", "HOLD") and L.get("sono"):
                 try: orders.cancel(c, L["sono"], L.get("sorg") or "", L.get("sqty") or L["qty"], live=True)
                 except Exception: pass
-        for code in {L["code"] for L in legs.values()}:    # 종목별 1회 전량청산(중복매도 방지)
-            h = _held(c, code)
-            if h >= 1:
-                cur = last.get(code) or _price(c, code)[0]
-                px = round_tick(cur * 0.99, up=False)
-                try:
-                    orders.sell(c, code, h, price=px, market=False, live=True, exchange=None)
-                    log("AP", code, {"name": code, "qty": h, "lim": px}, "CLOSE_SELL", "종료청산")
-                except Exception: pass
+        # 종목별 'stratv0 순보유 = 오늘 매수체결 − 목표매도체결'만 청산(잔고 전체 _held 절대 사용 금지)
+        own = {}
+        for L in legs.values():
+            bought = min(fl.get(L.get("ono"), 0), L["qty"])  # 이 레그가 실제 매수 체결한 수량
+            sold = fl.get(L.get("sono"), 0)                  # 목표매도로 이미 체결된 수량
+            rem = bought - sold
+            if rem > 0:
+                own[L["code"]] = own.get(L["code"], 0) + rem
+        for code, q in own.items():    # 자기 인트라데이 잔량만 시장가 인근 청산
+            if q < 1:
+                continue
+            cur = last.get(code) or _price(c, code)[0]
+            px = round_tick(cur * 0.99, up=False)
+            try:
+                orders.sell(c, code, q, price=px, market=False, live=True, exchange=None)
+                log("AP", code, {"name": code, "qty": q, "lim": px}, "CLOSE_SELL", "종료청산(자기체결분)")
+            except Exception: pass
     f.close()
     done = sum(1 for L in legs.values() if L["st"] == "DONE")
     nf = sum(1 for L in legs.values() if L["st"] not in ("WAIT",))
