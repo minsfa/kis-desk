@@ -150,7 +150,9 @@ def main(argv=None):
     p_v0.add_argument("--surge", type=float, default=None, help="C2 전날 급등 기준(퍼센트)")
     p_v0.add_argument("--until", default="15:20")
     p_v0.add_argument("--poll", type=int, default=15)
-    p_v0.add_argument("--live", action="store_true", help="실거래(단 .env DRY_RUN=false라야 발동)")
+    p_v0.add_argument("--live", action="store_true", help="실거래(단 .env DRY_RUN=false 그리고 stratv0arm 무장돼야 발동)")
+    sub.add_parser("stratv0arm", help="오늘 stratv0 라이브 무장(비번 입력 → 그날만 실주문 허용)")
+    sub.add_parser("stratv0disarm", help="오늘 stratv0 라이브 해제(감시만)")
     sub.add_parser("orders", parents=[common], help="당일 주문체결조회")
     sub.add_parser("report", parents=[common], help="당일 요약(openclaw 보고용)")
     p_cfg = sub.add_parser("stratcfg", parents=[common],
@@ -280,6 +282,23 @@ def main(argv=None):
         from .kis.auth import get_access_token
         tok = get_access_token(s)
         _print({"env": s.env, "token_prefix": tok[:12] + "...", "host": s.host})
+        return 0
+
+    if args.cmd == "stratv0arm":        # 네트워크 불필요 — 오늘자 라이브 무장(사람이 비번 입력)
+        import getpass
+        try:
+            pin = getpass.getpass("오늘 stratv0 라이브 비번: ")
+            ok = strat_v0.arm(pin)
+        except ValueError as e:
+            print(f"[무장 거부] {e}", file=sys.stderr); return 2
+        if ok:
+            print(f"✅ {strat_v0._today_kst()} stratv0 라이브 무장 완료 — 오늘 크론은 실주문 진행. 해제: stratv0disarm")
+            return 0
+        print("[무장 실패] 비번 불일치 — 오늘은 미무장(감시만)", file=sys.stderr); return 2
+
+    if args.cmd == "stratv0disarm":     # 네트워크 불필요 — 오늘자 라이브 해제
+        strat_v0.disarm()
+        print("🔒 stratv0 라이브 해제 — 오늘 실주문 안 함(감시만)")
         return 0
 
     if args.cmd == "stratcfg":          # 네트워크 불필요 — 설정 변경/조회 전용
