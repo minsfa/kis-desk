@@ -6,7 +6,9 @@
 브래킷: 매수 지정가 체결되면 '즉시' 목표가(+target%) 매도 지정가를 건다(걸어놓고 기다림).
 종목당 budget(원) 한도, 못 사면 스킵, 종목당 1회, 마감 전 미체결주문 취소+자기체결분만 청산
 (계좌 기존 보유분은 절대 청산하지 않음 — 잔고 전체를 읽어 파는 짓 금지).
-통합(UN)·SOR → NXT 프리마켓(08:00~) 포함. 잔고기반 체결확인. live AND DRY_RUN=false 일때만 실주문. STOP파일=즉시중단.
+통합(UN)·SOR → NXT 프리마켓(08:00~) 포함. 잔고기반 체결확인. STOP파일=즉시중단.
+실주문 발동 3중 조건: live 플래그 AND .env DRY_RUN=false AND 그날 사람이 'stratv0arm'으로 비번 무장.
+무장 없으면(크론이 돌아도) PAPER로 동작 = 감시만, 실주문 0. 무장은 당일 자동만료(어제 무장 무효).
 """
 from __future__ import annotations
 import csv
@@ -21,8 +23,41 @@ from .tick import round_tick
 
 KST = timezone(timedelta(hours=9))
 DATA_DIR = PROJECT_ROOT / "data"
+ARM_FILE = DATA_DIR / "state" / "stratv0_arm"   # 당일 라이브 '무장' 토큰(내용=오늘 날짜). 사람이 비번으로만 생성.
 CHART = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
 MKT = "UN"
+
+
+def _today_kst() -> str:
+    return datetime.now(KST).strftime("%Y-%m-%d")
+
+
+def _arm_ok() -> bool:
+    """오늘 날짜로 '무장'됐는지. 토큰 내용이 오늘 날짜와 일치해야 True(어제 무장은 자동만료)."""
+    try:
+        return ARM_FILE.read_text(encoding="utf-8").strip() == _today_kst()
+    except Exception:
+        return False
+
+
+def arm(pin: str) -> bool:
+    """비번이 config/.env STRATV0_ARM_PIN 과 일치하면 오늘자 무장 토큰을 쓴다. 일치/생성=True."""
+    import os
+    expected = os.getenv("STRATV0_ARM_PIN", "")
+    if not expected:
+        raise ValueError("STRATV0_ARM_PIN 미설정 — config/.env 에 비번을 먼저 등록하세요")
+    if str(pin).strip() != expected:
+        return False
+    ARM_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ARM_FILE.write_text(_today_kst(), encoding="utf-8")
+    return True
+
+
+def disarm() -> None:
+    try:
+        ARM_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
 C1_LEADERS = {
     "005930": "삼성전자", "000660": "SK하이닉스", "122630": "KODEX레버리지", "091160": "KODEX반도체",
@@ -92,6 +127,10 @@ def run(c, budget=None, dip=None, target=None, wall=None, surge=None,
     if new:
         w.writerow(["ts", "mode", "strat", "code", "name", "event", "qty", "buy", "target", "note"])
     armed = bool(live) and (not c.s.dry_run)
+    if armed and not _arm_ok():          # 라이브라도 사람이 비번으로 '무장'하지 않으면 실주문 금지(감시만)
+        armed = False
+        print("[v0] ⚠️ 미무장 — 오늘 라이브 주문 안 함(감시만). "
+              "무장: ./.venv/bin/python -m src.cli stratv0arm (비번 입력)", flush=True)
     mode = "LIVE" if armed else "PAPER"
 
     # 승인 게이트: live면 항상 ON, paper도 approved.json 있으면 ON. 게이트 ON이면 승인 종목만 장전.
