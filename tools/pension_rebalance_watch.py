@@ -26,11 +26,11 @@ from src.kis.fundamentals import get_fundamentals
 
 # ── 1차 매수 기준값 — 체결 후 실제 값으로 갱신할 것 ──────────────
 # (None이면 "1차 미체결"로 표시하고 현재가만 보고)
-BASE = {
-    "date": None,          # "2026-09-14"
-    "fx": None,            # 1차 체결일 원달러 (예: 1370.0)
-    "360200": None,        # ACE 미국S&P500 체결 평단
-    "458730": None,        # TIGER 미국배당다우존스 체결 평단
+BASE = {  # 1차 체결 2026-09-16 09:38 (미래에셋 알림톡 기준)
+    "date": "2026-09-16",
+    "fx": 1365.0,          # 체결 시각 원달러 추정 (당일 시가 1,363.2 · 10:09 1,370.6 사이)
+    "360200": 26085.0,     # ACE 미국S&P500 421주 @26,085 = 10,981,785원 (주문 9427)
+    "458730": 14850.0,     # TIGER 미국배당다우존스 673주 @14,850 = 9,994,050원 (주문 9471)
 }
 
 TARGETS = [
@@ -50,6 +50,26 @@ ETF_DIP = -5.0       # 1차 대비 -5% 이하 = 2차 앞당기기 검토
 ETF_RUN = +7.0       # +7% 이상 = 서두르지 말 것
 
 
+def _fx_on(day: str):
+    """FRED DEXKOUS 특정일(YYYY-MM-DD) 원달러. 없으면 None. 1차 기준값을 같은 소스로 맞추기 위함."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import requests
+        from fx_check import _fred_key  # type: ignore
+        key = _fred_key()
+        if not key:
+            return None
+        r = requests.get("https://api.stlouisfed.org/fred/series/observations", params={
+            "series_id": "DEXKOUS", "api_key": key, "file_type": "json",
+            "observation_start": day, "observation_end": day}, timeout=15)
+        for o in r.json().get("observations", []):
+            if o.get("value") not in (None, "", "."):
+                return float(o["value"])
+    except Exception:
+        pass
+    return None
+
+
 def _fx():
     """FRED DEXKOUS 원달러. tools/fx_check.py 와 같은 소스."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -58,10 +78,10 @@ def _fx():
         key = _fred_key()
         if not key:
             return None
-        rate, _asof = latest_usdkrw(key)   # (환율, 날짜) 순서 — 날짜가 뒤
-        return float(rate) if rate else None
+        rate, asof = latest_usdkrw(key)   # (환율, 날짜) 순서 — 날짜가 뒤
+        return (float(rate), str(asof)) if rate else (None, None)
     except Exception:
-        return None
+        return (None, None)
 
 
 def _px(c, code):
@@ -82,9 +102,16 @@ def main():
     alerts, lines = [], []
 
     # ── 환율
-    fx = _fx()
+    fx, fx_asof = _fx()
+    # 1차 기준 환율은 FRED 같은 날짜 값이 나오면 그걸로 교체(동일 소스 비교). 발표 전엔 체결 시각 추정치 사용.
+    if BASE.get("date"):
+        fx_base = _fx_on(BASE["date"])
+        if fx_base:
+            BASE["fx"] = fx_base
     if fx is None:
         lines.append("환율 조회 실패 (FRED)")
+    elif BASE["fx"] and BASE.get("date") and fx_asof and fx_asof < BASE["date"]:
+        lines.append(f"환율 FRED 최신 {fx:,.1f}원({fx_asof}) — 1차 체결일({BASE['date']}) 이전 값이라 비교 보류")
     elif BASE["fx"]:
         gap = (fx / BASE["fx"] - 1) * 100
         lines.append(f"환율 {fx:,.1f}원 (1차 {BASE['fx']:,.1f} 대비 {gap:+.1f}%)")
