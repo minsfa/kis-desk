@@ -79,19 +79,36 @@ def accumulate(c: KisClient, codes: dict[str, str]) -> str:
             w = csv.writer(f); w.writerow(HCOLS)
             for d in dates:
                 w.writerow(rows[d])
-        # 전환 감지: 외국인 순매수량 최근5일 vs 직전5일
-        fq = []
+        # 전환 감지: 외국인 순매수 '금액'(백만원) 최근5일 vs 직전5일. 5일합만 보면 창 앞쪽의 큰 매수가
+        # 남아 있는 동안 최근 이틀 매도 중인 종목도 '전환'으로 잡히므로, 최근 2일 합 > 0 을 '확인' 조건으로 둔다.
+        fv = []
         for d in dates:
-            try: fq.append(float(rows[d][3] or 0))
-            except: fq.append(0.0)
-        if len(fq) >= 10:
-            rec, pri = sum(fq[-5:]), sum(fq[-10:-5])
+            try: fv.append(float(rows[d][6] or 0))
+            except: fv.append(0.0)
+        if len(fv) >= 10:
+            rec, pri, last2 = sum(fv[-5:]), sum(fv[-10:-5]), sum(fv[-2:])
             if rec > 0 and pri < 0:
-                turns.append(name)
+                confirmed = last2 > 0
+                turns.append((name, code, rec, pri, last2, confirmed))
     msg = (f"[수급누적] {datetime.now(KST):%Y-%m-%d %H:%M} · {len(codes)}종목 · "
            f"신규 {added_total}행 적재 (data/investor_history/)")
     if turns:
-        msg += f"\n⚡외국인 매수전환 신호: {', '.join(turns)}"
+        today = f"{datetime.now(KST):%Y%m%d}"
+        tp = HIST_DIR.parent / "investor_turns.csv"
+        new_file = not tp.exists()
+        with open(tp, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(["date", "code", "name", "rec5_mkrw", "pri5_mkrw", "last2_mkrw", "confirmed"])
+            for name, code, rec, pri, last2, ok in turns:
+                w.writerow([today, code, name, round(rec), round(pri), round(last2), int(ok)])
+        conf = [f"{n}(5일 {r/100:+,.0f}억·2일 {l/100:+,.0f}억)" for n, _, r, _, l, ok in turns if ok]
+        weak = [n for n, _, _, _, _, ok in turns if not ok]
+        if conf:
+            msg += f"\n⚡외국인 매수전환 확인(최근 2일도 순매수): {', '.join(conf)}"
+        if weak:
+            msg += f"\n〰 5일합은 전환이나 최근 2일 매도 중(미확인): {', '.join(weak)}"
+        msg += "\n(기록: data/investor_turns.csv)"
     return msg
 
 

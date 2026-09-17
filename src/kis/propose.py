@@ -32,14 +32,14 @@ def _foreign_turn(code):
     p = DATA_DIR / "investor_history" / f"{code}.csv"
     if not p.exists():
         return None
-    fq = []
+    fv = []
     with open(p, encoding="utf-8") as f:
         for r in csv.DictReader(f):
-            try: fq.append(float(r.get("foreign_netqty") or 0))
+            try: fv.append(float(r.get("foreign_netval") or 0))  # 금액(백만원) 기준
             except Exception: pass
-    if len(fq) < 10:
+    if len(fv) < 10:
         return None
-    return sum(fq[-5:]), sum(fq[-10:-5])  # 최근5, 직전5
+    return sum(fv[-5:]), sum(fv[-10:-5]), sum(fv[-2:])  # 최근5, 직전5, 최근2(확인용)
 
 
 def run(c: KisClient, budget=None, dip=None, target=None, surge=None) -> str:
@@ -91,19 +91,22 @@ def run(c: KisClient, budget=None, dip=None, target=None, surge=None) -> str:
         if code in C1_LEADERS or code in cfg.get("c1_extra", {}):  # 대장/관심 상시워치
             sig.append("C1")
         ft = _foreign_turn(code)
-        if ft and ft[0] > 0 and ft[1] < 0:                    # 외인 매도→매수 전환
-            sig.append("외인전환"); turns.append(name)
+        if ft and ft[0] > 0 and ft[1] < 0:                    # 외인 매도→매수 전환(금액 기준)
+            if ft[2] > 0:                                     # 최근 2일도 순매수 = 확인된 전환
+                sig.append("외인전환"); turns.append(name)
+            else:                                             # 5일합만 전환, 최근 2일은 매도 = 미확인(가점 축소)
+                sig.append("외인5일")
         if not sig:                                           # 아무 신호 없으면 후보 제외
             continue
         # 점수 = 오늘등락 + 외인전환 가점 + 대장 가점 (투명·튜닝가능)
-        score = round(chg + (8 if "외인전환" in sig else 0) + (4 if "C1" in sig else 0), 1)
+        score = round(chg + (8 if "외인전환" in sig else 3 if "외인5일" in sig else 0) + (4 if "C1" in sig else 0), 1)
         cands.append({"name": name, "code": code, "chg": chg, "close": close, "qty": qty,
                       "nxt": nxt, "entry": entry, "target": tgt, "score": score, "sig": sig,
                       "basis": basis})
 
     cands.sort(key=lambda x: -x["score"])
     ranked = cands[:rank_n]
-    L.append(f"\n🏆 종합 랭킹 TOP {len(ranked)} (점수 = 오늘등락 + 외인전환 +8 + 대장 +4)")
+    L.append(f"\n🏆 종합 랭킹 TOP {len(ranked)} (점수 = 오늘등락 + 외인전환(확인) +8 / 미확인 +3 + 대장 +4)")
     if ranked:
         L.append("| # | 종목(코드) | 신호 | 등락 | 종가 | 진입가(수량) | 목표가 | 점수 | 방식 | 시장 |")
         L.append("|---|---|---|---|---|---|---|---|---|---|")
