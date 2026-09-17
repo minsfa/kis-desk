@@ -107,7 +107,9 @@ def _closes(c, code):
             if not rows and path.exists():
                 rows = list(csv.DictReader(open(path)))
     rows.sort(key=lambda r: r["date"])
-    return [int(r["close"]) for r in rows if r.get("close")]
+    today_s = date.today().strftime("%Y%m%d")
+    # 장중/장전 조회 시 KIS가 오늘 날짜 행(미확정 시세)을 돌려주므로 종가 확정 전인 오늘 행은 제외
+    return [int(r["close"]) for r in rows if r.get("close") and r["date"] < today_s]
 
 
 def _ma(closes, n):
