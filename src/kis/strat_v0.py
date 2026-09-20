@@ -4,8 +4,11 @@
   C1 (눌림+매수벽): 대장주/저가ETF가 -dip% 도달 AND 호가 매수벽(통합 잔량비>=wall)일 때.
   C2 (전날급등→익일눌림): 전날 +surge%↑ 급등 종목 아침 스캔 → -dip% 보수 진입.
 브래킷: 매수 지정가 체결되면 '즉시' 목표가(+target%) 매도 지정가를 건다(걸어놓고 기다림).
-종목당 budget(원) 한도, 못 사면 스킵, 종목당 1회, 마감 전 미체결매도 취소+전량청산.
-통합(UN)·SOR → NXT 프리마켓(08:00~) 포함. 잔고기반 체결확인. live AND DRY_RUN=false 일때만 실주문. STOP파일=즉시중단.
+종목당 budget(원) 한도, 못 사면 스킵, 종목당 1회, 마감 전 미체결주문 취소+자기체결분만 청산
+(계좌 기존 보유분은 절대 청산하지 않음 — 잔고 전체를 읽어 파는 짓 금지).
+통합(UN)·SOR → NXT 프리마켓(08:00~) 포함. 잔고기반 체결확인. STOP파일=즉시중단.
+실주문 발동 3중 조건: live 플래그 AND .env DRY_RUN=false AND 그날 사람이 'stratv0arm'으로 비번 무장.
+무장 없으면(크론이 돌아도) PAPER로 동작 = 감시만, 실주문 0. 무장은 당일 자동만료(어제 무장 무효).
 """
 from __future__ import annotations
 import csv
@@ -20,8 +23,41 @@ from .tick import round_tick
 
 KST = timezone(timedelta(hours=9))
 DATA_DIR = PROJECT_ROOT / "data"
+ARM_FILE = DATA_DIR / "state" / "stratv0_arm"   # 당일 라이브 '무장' 토큰(내용=오늘 날짜). 사람이 비번으로만 생성.
 CHART = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
 MKT = "UN"
+
+
+def _today_kst() -> str:
+    return datetime.now(KST).strftime("%Y-%m-%d")
+
+
+def _arm_ok() -> bool:
+    """오늘 날짜로 '무장'됐는지. 토큰 내용이 오늘 날짜와 일치해야 True(어제 무장은 자동만료)."""
+    try:
+        return ARM_FILE.read_text(encoding="utf-8").strip() == _today_kst()
+    except Exception:
+        return False
+
+
+def arm(pin: str) -> bool:
+    """비번이 config/.env STRATV0_ARM_PIN 과 일치하면 오늘자 무장 토큰을 쓴다. 일치/생성=True."""
+    import os
+    expected = os.getenv("STRATV0_ARM_PIN", "")
+    if not expected:
+        raise ValueError("STRATV0_ARM_PIN 미설정 — config/.env 에 비번을 먼저 등록하세요")
+    if str(pin).strip() != expected:
+        return False
+    ARM_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ARM_FILE.write_text(_today_kst(), encoding="utf-8")
+    return True
+
+
+def disarm() -> None:
+    try:
+        ARM_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
 C1_LEADERS = {
     "005930": "삼성전자", "000660": "SK하이닉스", "122630": "KODEX레버리지", "091160": "KODEX반도체",
@@ -69,16 +105,6 @@ def _nxt_ok(c, code) -> bool:
         return False
 
 
-def _held(c, code):
-    for h in market.get_balance(c).get("holdings", []):
-        if h.get("code") == code:
-            try:
-                return int(float(h.get("qty") or 0))
-            except Exception:
-                return 0
-    return 0
-
-
 def _qty(price, budget):
     return int(budget // price) if 0 < price <= budget else 0
 
@@ -101,6 +127,10 @@ def run(c, budget=None, dip=None, target=None, wall=None, surge=None,
     if new:
         w.writerow(["ts", "mode", "strat", "code", "name", "event", "qty", "buy", "target", "note"])
     armed = bool(live) and (not c.s.dry_run)
+    if armed and not _arm_ok():          # 라이브라도 사람이 비번으로 '무장'하지 않으면 실주문 금지(감시만)
+        armed = False
+        print("[v0] ⚠️ 미무장 — 오늘 라이브 주문 안 함(감시만). "
+              "무장: ./.venv/bin/python -m src.cli stratv0arm (비번 입력)", flush=True)
     mode = "LIVE" if armed else "PAPER"
 
     # 승인 게이트: live면 항상 ON, paper도 approved.json 있으면 ON. 게이트 ON이면 승인 종목만 장전.
@@ -264,7 +294,8 @@ def run(c, budget=None, dip=None, target=None, wall=None, surge=None,
                     pass
         time.sleep(poll)
 
-    if armed:  # 마감 전: 미체결 주문 취소 → 종목별 보유 1회 전량청산(안전망)
+    if armed:  # 마감 전: 미체결 주문 취소 → stratv0 '자기 체결분'만 청산(계좌 기존 보유분 보호)
+        fl = fills()  # 청산 시점 주문번호별 체결수량 스냅샷
         for L in legs.values():
             if L["st"] == "ORDERED" and L.get("ono"):
                 try:
@@ -274,15 +305,23 @@ def run(c, budget=None, dip=None, target=None, wall=None, surge=None,
             if L["st"] in ("SELL_PLACED", "HOLD") and L.get("sono"):
                 try: orders.cancel(c, L["sono"], L.get("sorg") or "", L.get("sqty") or L["qty"], live=True)
                 except Exception: pass
-        for code in {L["code"] for L in legs.values()}:    # 종목별 1회 전량청산(중복매도 방지)
-            h = _held(c, code)
-            if h >= 1:
-                cur = last.get(code) or _price(c, code)[0]
-                px = round_tick(cur * 0.99, up=False)
-                try:
-                    orders.sell(c, code, h, price=px, market=False, live=True, exchange=None)
-                    log("AP", code, {"name": code, "qty": h, "lim": px}, "CLOSE_SELL", "종료청산")
-                except Exception: pass
+        # 종목별 'stratv0 순보유 = 오늘 매수체결 − 목표매도체결'만 청산(잔고 전체 _held 절대 사용 금지)
+        own = {}
+        for L in legs.values():
+            bought = min(fl.get(L.get("ono"), 0), L["qty"])  # 이 레그가 실제 매수 체결한 수량
+            sold = fl.get(L.get("sono"), 0)                  # 목표매도로 이미 체결된 수량
+            rem = bought - sold
+            if rem > 0:
+                own[L["code"]] = own.get(L["code"], 0) + rem
+        for code, q in own.items():    # 자기 인트라데이 잔량만 시장가 인근 청산
+            if q < 1:
+                continue
+            cur = last.get(code) or _price(c, code)[0]
+            px = round_tick(cur * 0.99, up=False)
+            try:
+                orders.sell(c, code, q, price=px, market=False, live=True, exchange=None)
+                log("AP", code, {"name": code, "qty": q, "lim": px}, "CLOSE_SELL", "종료청산(자기체결분)")
+            except Exception: pass
     f.close()
     done = sum(1 for L in legs.values() if L["st"] == "DONE")
     nf = sum(1 for L in legs.values() if L["st"] not in ("WAIT",))
