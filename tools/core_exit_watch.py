@@ -20,6 +20,10 @@
      이벤트 경과 후 판정 미입력 → 📅 판정 입력 요청
      레벨·하한 변동 → ⬆️/⬇️ 통보
   5) 트림이 체결되어 보유수량이 줄면 ✅ 확인 후 기준 고점을 다시 잡아 다음 단계 감시.
+  6) 보류 모드 (life-ops #29 §3-A, 2026-10-21 결정 — HOLD_UNTIL까지):
+       추격 매도 금지. 현재가 < 하한 이어도 📉 매도 지시 요청을 내지 않고 '--- 참고' 줄에만 둔다.
+       대신 RECOVERY 레벨 회복(삼성전자 ≥ 240,000) 시 🎯 트림 제안(15주). 상방 게이트·이벤트·레벨 통보는 그대로.
+       HOLD_UNTIL(11/23 #29 리뷰) 경과 후에는 4)의 원래 동작으로 자동 복귀.
 
 실행 예:
   python tools/core_exit_watch.py                       # 크론용 (상태 갱신 + 알림)
@@ -59,6 +63,9 @@ TARGETS = [
 K_BY_LEVEL = {0: 0.0, 1: 0.25, 2: 0.5, 3: 0.8}
 FX_SELL_1, FX_SELL_2 = 2.0, 5.0      # 외국인 5일 누적 순매도(조원) 임계
 DRAWDOWN = -30.0                     # 고점 대비 %
+# 보류 모드 — life-ops #29 §3-A (2026-10-21): 추격 매도 금지. 리뷰일까지 하한 이탈은 참고만.
+HOLD_UNTIL = date(2026, 11, 23)
+RECOVERY = {"005930": (240_000, 15)}  # code → (회복 레벨, 트림 제안 수량). 없으면 회복 제안 없음.
 STALE_DAYS = 1                       # 일봉 캐시 허용 나이(일)
 
 # 이벤트 — 경과 후 사람이 판정 입력(neg/pos/neutral). codes=None 이면 두 종목 공통.
@@ -229,6 +236,7 @@ def run(show_only=False):
     held = _holdings(c) or {}
 
     alerts, notes, info = [], [], []
+    hold = today <= HOLD_UNTIL
     for t in TARGETS:
         code, nm = t["code"], t["name"]
         q = _quote(c, code)
@@ -268,11 +276,18 @@ def run(show_only=False):
                 n = st["below_days"].get(code, 0) + (0 if show_only else 1)
                 if not show_only:
                     st["below_days"][code] = n
-                alerts.append(f"📉 {tag} < 하한 {floor:,.0f} (L{level}, {n}일째) — {trim}주 매도 지시?")
+                if hold:
+                    info.append(f"{tag} < 하한 {floor:,.0f} (L{level}, {n}일째) — 보류 중(#29, ~{HOLD_UNTIL:%m/%d})")
+                else:
+                    alerts.append(f"📉 {tag} < 하한 {floor:,.0f} (L{level}, {n}일째) — {trim}주 매도 지시?")
             else:
                 if not show_only:
                     st["below_days"][code] = 0
                 info.append(f"{tag} / 하한 {floor:,.0f} ({gap:+.1f}%) L{level} 점수{score}")
+        rec = RECOVERY.get(code)
+        if hold and rec and px >= rec[0]:
+            rq = min(rec[1], qty) if qty else rec[1]
+            alerts.append(f"🎯 {tag} ≥ 회복 레벨 {rec[0]:,} — {rq}주 트림 제안 (#29)")
         if px >= t["gate_up"]:
             alerts.append(f"🎯 {tag} ≥ 상방 게이트 {t['gate_up']:,} — {trim}주 익절 지시?")
         if floor is not None and prev_floor is None and not show_only:
@@ -299,7 +314,8 @@ def run(show_only=False):
         if info:
             print("--- 참고: " + " · ".join(info))
         return
-    print(f"OK 하한 유지 ({today:%m/%d})" + (" | " + " · ".join(info) if info else ""))
+    head = f"OK 보류 감시 ({today:%m/%d}, ~{HOLD_UNTIL:%m/%d})" if hold else f"OK 하한 유지 ({today:%m/%d})"
+    print(head + (" | " + " · ".join(info) if info else ""))
     if soon:
         print("\n".join(lines))
 
