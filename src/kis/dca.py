@@ -153,7 +153,7 @@ def _ledger_rows() -> list[dict]:
 def _month_state() -> tuple[set[str], set[str]]:
     """이번 달 원장 → (끝난 티커, 주문 실패로 재시도 대기인 티커).
     끝남 = buy(접수됨)·skip(예산부족)·blocked(안전 한도, 사람이 풀어야 함).
-    failed(주문 거부·달러 부족)는 끝난 게 아니다."""
+    failed(주문 거부·달러 부족)·unfilled(접수됐지만 체결 0주로 만료)는 끝난 게 아니다."""
     m = _month()
     done, failed = set(), set()
     for r in _ledger_rows():
@@ -161,9 +161,63 @@ def _month_state() -> tuple[set[str], set[str]]:
             continue
         if r.get("action") in ("buy", "skip", "blocked"):
             done.add(r.get("ticker"))
-        elif r.get("action") == "failed":
+        elif r.get("action") in ("failed", "unfilled"):
             failed.add(r.get("ticker"))
     return done, failed - done
+
+
+FILL_MARK = "체결확인"
+FILL_WAIT_H = 20      # 주문 후 이 시간이 지나면(미국 정규장 종료) 미체결분은 만료된 것으로 본다
+
+
+def reconcile(c: KisClient, live: bool = True) -> list[str]:
+    """원장의 buy(=접수) 줄을 실제 체결내역과 맞춘다. 바뀐 내용을 문장 목록으로 돌려준다.
+    - 전량 체결: 가격·금액을 실제 체결값으로 고치고 메모에 '체결확인'.
+    - 일부 체결 후 만료: 수량을 체결 수량으로 줄인다.
+    - 0주 체결로 만료: action을 unfilled로 바꾼다(같은 달이면 재시도 대상).
+    - 아직 대기 중이거나 내역에 없으면 그대로 둔다. dry-run(live=False)은 원장을 쓰지 않는다."""
+    rows = _ledger_rows()
+    todo = []
+    for r in rows:
+        if r.get("action") != "buy" or FILL_MARK in (r.get("note") or ""):
+            continue
+        ono = next((w for w in (r.get("note") or "").split() if w.isdigit() and len(w) >= 8), None)
+        if ono:
+            todo.append((r, ono))
+    if not todo:
+        return []
+    now = datetime.now(KST)
+    start = min(r["ts"] for r, _ in todo)[:10].replace("-", "")
+    hist = overseas.order_history(c, start, f"{now:%Y%m%d}")
+    changes = []
+    for r, ono in todo:
+        h = hist.get(ono)
+        if not h or h["symbol"] != r.get("ticker"):
+            continue
+        age_h = (now - datetime.strptime(r["ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)).total_seconds() / 3600
+        closed = h["nccs_qty"] == 0 or age_h >= FILL_WAIT_H
+        if not closed:
+            continue
+        tk, want, got = r["ticker"], h["ord_qty"], h["ccld_qty"]
+        if got <= 0:
+            r["action"] = "unfilled"
+            r["note"] = f"{r['note']} 미체결 만료(0/{want}주)"
+            changes.append(f"{tk} {r['ts'][:10]} 주문 {ono}: 체결 0주로 만료 → unfilled")
+            continue
+        r["qty"], r["price"], r["usd"] = got, round(h["ccld_price"], 4), round(h["ccld_amt"], 2)
+        part = f" 부분체결({got}/{want}주)" if got < want else ""
+        r["note"] = f"{r['note']}{part} {FILL_MARK}"
+        changes.append(f"{tk} {r['ts'][:10]} 주문 {ono}: {got}/{want}주 @${h['ccld_price']:.2f} {FILL_MARK}")
+    if changes and live:
+        cols = ["ts", "month", "action", "ticker", "qty", "price", "usd", "strength", "pos", "note"]
+        tmp = LEDGER.with_suffix(".csv.tmp")
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+        tmp.replace(LEDGER)
+        log_event("dca_reconcile", n=len(changes), changes=changes)
+    return changes
 
 
 def _log_failed(row: dict, live: bool, already: set[str]):
@@ -224,11 +278,18 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
     if not strengths:
         return {"skip": "시세 없음(미국장 마감/조회불가)", "mon": mon}
 
-    # 2) 이번 달 이미 끝났나? (티커별: 접수된 매수·예산부족 skip = 끝, 주문 실패 = 재시도 대기)
+    # 1.5) 접수된 주문이 실제로 체결됐는지 원장과 맞춘다. 조회가 안 돼도 적립은 막지 않는다.
+    try:
+        recon = reconcile(c, live)
+    except Exception as e:
+        recon = [f"체결 확인 실패: {e}"]
+
+    # 2) 이번 달 이미 끝났나? (티커별: 접수된 매수·예산부족 skip = 끝, 주문 실패·미체결 = 재시도 대기)
     done, failed = _month_state()
     pending = [tk for tk, _, _ in UNIVERSE if tk not in done]
     if not pending:
-        return {"status": "이번달 매수 완료", "month": _month(), "mon": mon}
+        return {"status": "이번달 매수 완료", "month": _month(), "mon": mon,
+                **({"reconcile": recon} if recon else {})}
     retry = bool(done or failed)      # 이번 달 진입 결정은 이미 났고, 일부가 안 사진 상태
 
     # 2.5) 거시 가치 오버레이(섹터 공통배수). 실패하면 1.0 중립(매매 안 막음).
@@ -309,7 +370,8 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
     return {"status": f"매수 실행({reason}, 블렌드강도{round(blended,2)})",
             "blended": round(blended, 2), "valuation": round(val_f, 2),
             "val_why": val_why, "budget": budget, "placed": placed,
-            **({"warn": warns} if warns else {})}
+            **({"warn": warns} if warns else {}),
+            **({"reconcile": recon} if recon else {})}
 
 
 def report(c: KisClient | None = None) -> str:

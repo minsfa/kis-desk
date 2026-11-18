@@ -182,6 +182,31 @@ def today_orders(c: KisClient, excg: str = "NASD") -> list[dict]:
     return rows
 
 
+def order_history(c: KisClient, start: str, end: str) -> dict[str, dict]:
+    """기간(YYYYMMDD) 미국 주문체결내역 → {주문번호: 체결정보}. 전 거래소("%") 조회."""
+    s = c.s
+    params = {"CANO": s.account, "ACNT_PRDT_CD": s.account_prod, "PDNO": "%",
+              "ORD_STRT_DT": start, "ORD_END_DT": end, "SLL_BUY_DVSN": "00",
+              "CCLD_NCCS_DVSN": "00", "OVRS_EXCG_CD": "%", "SORT_SQN": "DS",
+              "ORD_DT": "", "ORD_GNO_BRNO": "", "ODNO": "",
+              "CTX_AREA_NK200": "", "CTX_AREA_FK200": ""}
+    d = c.get(CCNL_PATH, s.tr_us("ccnl"), params)
+    if str(d.get("rt_cd")) != "0":
+        raise RuntimeError(f"주문체결내역 조회 실패: {(d.get('msg1') or '').strip()}")
+    out = {}
+    for o in (d.get("output") or []):
+        out[o.get("odno")] = {
+            "symbol": o.get("pdno"), "ord_qty": int(float(o.get("ft_ord_qty") or 0)),
+            "ccld_qty": int(float(o.get("ft_ccld_qty") or 0)),
+            "ccld_price": float(o.get("ft_ccld_unpr3") or 0),
+            "ccld_amt": float(o.get("ft_ccld_amt3") or 0),
+            "nccs_qty": int(float(o.get("nccs_qty") or 0)),
+            "status": o.get("prcs_stat_name") or o.get("rjct_rson_name"),
+        }
+    log_event("us_order_history", start=start, end=end, n=len(out))
+    return out
+
+
 def buy(c, symb, qty, price, excg="NASD", live=False, daytime=None):
     return _order(c, "buy", symb, qty, price, excg, live, daytime)
 
