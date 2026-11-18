@@ -274,11 +274,18 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
         limit = round(px * BUY_SLIP, 2)
         base = {"ts": ts, "month": _month(), "ticker": tk, "price": limit,
                 "strength": round(strength, 2), "pos": m.get("z")}
-        # 달러 사전 점검: 모자라면 살 수 있는 만큼만, 1주도 안 되면 주문하지 않고 실패로 남긴다.
         want, shrunk = qty, ""
+        # 1회 주문 한도(MAX_ORDER_USD) 안으로 수량을 줄인다. 안 줄이면 강도가 높은 달(=가장 싼 달)에
+        # 주문이 통째로 안전차단되어 그 달 적립이 빠진다. 1주도 한도를 넘으면 그대로 두어 차단되게 한다.
+        cap = getattr(getattr(c, "s", None), "max_order_usd", None)
+        capq = int(cap // limit) if cap else None
+        if capq is not None and 1 <= capq < qty:
+            warns.append(f"{tk} 1회 주문 한도 ${cap:,.0f}: {qty}주 → {capq}주로 축소")
+            qty, shrunk = capq, f" 한도 축소({want}→{capq}주)"
+        # 달러 사전 점검: 모자라면 살 수 있는 만큼만, 1주도 안 되면 주문하지 않고 실패로 남긴다.
         mq = _max_qty(c, tk, limit, excd)
         if mq is not None and mq < qty:
-            warns.append(f"{tk} 달러 부족: {want}주 중 {mq}주만 가능(${want * limit:.0f} 필요)")
+            warns.append(f"{tk} 달러 부족: {qty}주 중 {mq}주만 가능(${qty * limit:.0f} 필요)")
             if mq < 1:
                 _log_failed({**base, "qty": want, "usd": round(want * limit, 2),
                              "note": "달러부족(주문가능 0주, 주문 안 함)"}, live, failed)
