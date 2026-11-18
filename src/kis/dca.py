@@ -150,9 +150,39 @@ def _ledger_rows() -> list[dict]:
     return list(csv.DictReader(open(LEDGER, encoding="utf-8")))
 
 
-def _bought_this_month() -> bool:
+def _month_state() -> tuple[set[str], set[str]]:
+    """이번 달 원장 → (끝난 티커, 주문 실패로 재시도 대기인 티커).
+    끝남 = buy(접수됨)·skip(예산부족)·blocked(안전 한도, 사람이 풀어야 함).
+    failed(주문 거부·달러 부족)는 끝난 게 아니다."""
     m = _month()
-    return any(r.get("month") == m and r.get("action") == "buy" for r in _ledger_rows())
+    done, failed = set(), set()
+    for r in _ledger_rows():
+        if r.get("month") != m:
+            continue
+        if r.get("action") in ("buy", "skip", "blocked"):
+            done.add(r.get("ticker"))
+        elif r.get("action") == "failed":
+            failed.add(r.get("ticker"))
+    return done, failed - done
+
+
+def _log_failed(row: dict, live: bool, already: set[str]):
+    """실패는 티커당 월 1줄만 원장에 남긴다(매일 재시도해도 원장이 불어나지 않게)."""
+    if row.get("ticker") in already:
+        return
+    _log({**row, "action": "failed"}, live)
+    already.add(row.get("ticker"))
+
+
+def _max_qty(c: KisClient, tk: str, limit: float, excd: str) -> int | None:
+    """지금 달러로 살 수 있는 최대 수량. 조회가 안 되면 None(사전 점검 생략, 주문은 그대로 시도)."""
+    try:
+        r = overseas.can_buy(c, tk, limit, excg=excd)
+        if str(r.get("rt_cd")) != "0":
+            return None
+        return int(float(r.get("max_qty") or 0))
+    except Exception:
+        return None
 
 
 def _log(row: dict, live: bool = True):
@@ -194,9 +224,12 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
     if not strengths:
         return {"skip": "시세 없음(미국장 마감/조회불가)", "mon": mon}
 
-    # 2) 이번 달 이미 매수?
-    if _bought_this_month():
+    # 2) 이번 달 이미 끝났나? (티커별: 접수된 매수·예산부족 skip = 끝, 주문 실패 = 재시도 대기)
+    done, failed = _month_state()
+    pending = [tk for tk, _, _ in UNIVERSE if tk not in done]
+    if not pending:
         return {"status": "이번달 매수 완료", "month": _month(), "mon": mon}
+    retry = bool(done or failed)      # 이번 달 진입 결정은 이미 났고, 일부가 안 사진 상태
 
     # 2.5) 거시 가치 오버레이(섹터 공통배수). 실패하면 1.0 중립(매매 안 막음).
     val_f, val_why = 1.0, ["오버레이 꺼짐"]
@@ -212,16 +245,19 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
     wsum = sum(w for tk, _, w in UNIVERSE if tk in strengths)
     blended = sum(w * strengths[tk] for tk, _, w in UNIVERSE if tk in strengths) / (wsum or 1)
     near_monthend = datetime.now(KST).day >= MONTHEND_DAY
-    if not (blended >= DIP_TRIGGER or near_monthend):
+    if not (retry or blended >= DIP_TRIGGER or near_monthend):
         return {"status": "대기(좋은 진입 기다리는 중)", "blended": round(blended, 2),
                 "note": f"블렌드강도<{DIP_TRIGGER}(저평가 약함) 또는 {MONTHEND_DAY}일 이후 집행",
                 "mon": mon}
 
     # 4) 매수 실행 — 종목별 강도로 사이징(falling knife 자동 축소). 총지출은 STRENGTH_CAP로 캡.
     scale = min(1.0, STRENGTH_CAP / blended) if blended > 0 else 1.0
-    reason = "딥강화" if blended >= DIP_TRIGGER else "월말집행"
+    reason = "재시도" if retry else ("딥강화" if blended >= DIP_TRIGGER else "월말집행")
     placed = []
+    warns = []
     for tk, excd, w in UNIVERSE:
+        if tk in done:               # 이번 달 이미 접수됐거나 skip 처리된 티커
+            continue
         m = mon.get(tk, {})
         px = m.get("last")
         if not px:
@@ -236,15 +272,34 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
             placed.append({"ticker": tk, "skip": f"예산부족(target ${target:.0f} < 1주 ${px:.0f})"})
             continue
         limit = round(px * BUY_SLIP, 2)
+        base = {"ts": ts, "month": _month(), "ticker": tk, "price": limit,
+                "strength": round(strength, 2), "pos": m.get("z")}
+        # 달러 사전 점검: 모자라면 살 수 있는 만큼만, 1주도 안 되면 주문하지 않고 실패로 남긴다.
+        want, shrunk = qty, ""
+        mq = _max_qty(c, tk, limit, excd)
+        if mq is not None and mq < qty:
+            warns.append(f"{tk} 달러 부족: {want}주 중 {mq}주만 가능(${want * limit:.0f} 필요)")
+            if mq < 1:
+                _log_failed({**base, "qty": want, "usd": round(want * limit, 2),
+                             "note": "달러부족(주문가능 0주, 주문 안 함)"}, live, failed)
+                placed.append({"ticker": tk, "ok": False, "qty": want, "limit": limit,
+                               "failed": "달러부족(주문가능 0주)"})
+                continue
+            qty, shrunk = mq, f" 달러부족 축소({want}→{mq}주)"
         try:
             res = overseas.buy(c, tk, qty, limit, excg=excd, live=live)
             ok = bool(res.get("ok") or res.get("dry_run"))
-            _log({"ts": ts, "month": _month(), "action": "buy", "ticker": tk, "qty": qty,
-                  "price": limit, "usd": round(qty * limit, 2), "strength": round(strength, 2),
-                  "pos": m.get("z"),
-                  "note": f"{reason} {res.get('order_no','')}"}, live)
+            if ok:
+                _log({**base, "action": "buy", "qty": qty, "usd": round(qty * limit, 2),
+                      "note": f"{reason} {res.get('order_no','')}{shrunk}"}, live)
+            else:                    # 거부된 주문은 매수가 아니다 → failed, 다음 실행 때 재시도
+                why = f"{res.get('msg_cd') or ''} {res.get('msg') or ''}".strip()
+                warns.append(f"{tk} 주문 거부: {why}")
+                _log_failed({**base, "qty": qty, "usd": round(qty * limit, 2),
+                             "note": f"주문거부 {why}"}, live, failed)
             placed.append({"ticker": tk, "ok": ok, "qty": qty, "limit": limit,
-                           "order_no": res.get("order_no"), "dry_run": res.get("dry_run")})
+                           "order_no": res.get("order_no"), "dry_run": res.get("dry_run"),
+                           **({} if ok else {"failed": res.get("msg")})})
         except SafetyError as e:
             _log({"ts": ts, "month": _month(), "action": "blocked", "ticker": tk, "qty": qty,
                   "price": limit, "usd": round(qty * limit, 2), "note": f"안전차단:{e}"}, live)
@@ -253,7 +308,8 @@ def check(c: KisClient, budget: float = BUDGET_USD, live: bool = False) -> dict:
             placed.append({"ticker": tk, "error": str(e)})
     return {"status": f"매수 실행({reason}, 블렌드강도{round(blended,2)})",
             "blended": round(blended, 2), "valuation": round(val_f, 2),
-            "val_why": val_why, "budget": budget, "placed": placed}
+            "val_why": val_why, "budget": budget, "placed": placed,
+            **({"warn": warns} if warns else {})}
 
 
 def report(c: KisClient | None = None) -> str:
